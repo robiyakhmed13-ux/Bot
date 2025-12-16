@@ -15,7 +15,7 @@ const config = {
   SUPABASE_URL: process.env.SUPABASE_URL || '',
   SUPABASE_KEY: process.env.SUPABASE_ANON_KEY || '',
   OPENAI_API_KEY: process.env.OPENAI_API_KEY || '',
-  WEBAPP_URL: process.env.WEBAPP_URL || 'https://t.me/hamyon_uz_bot/app',
+  WEBAPP_URL: process.env.WEBAPP_URL || 'https://t.me/hamyonmoneybot/app',
 };
 
 const supabase = createClient(config.SUPABASE_URL, config.SUPABASE_KEY);
