@@ -152,14 +152,28 @@ async function getTodayStats(telegramId: number) {
 // ============================================
 function parseAmount(text: string): number | null {
   const lower = text.toLowerCase();
-  const millionMatch = lower.match(/(\d+(?:[.,]\d+)?)\s*(?:m|mln|million|миллион|млн)/i);
+  
+  // Million: 5m, 5 million, 5 mln, 5 миллион, 5 млн, 5 million
+  // Note: "m" alone should only match if it's clearly meant as million (e.g., "5m" not "5ming")
+  const millionMatch = lower.match(/(\d+(?:[.,]\d+)?)\s*(?:mln|million|миллион|млн)\b/i);
   if (millionMatch) return parseFloat(millionMatch[1].replace(',', '.')) * 1000000;
-  const kMatch = lower.match(/(\d+(?:[.,]\d+)?)\s*(?:k|к|тысяч|ming|минг)/i);
+  
+  // Check for standalone "m" (like "5m") but NOT "ming"
+  const mMatch = lower.match(/(\d+(?:[.,]\d+)?)\s*m(?!ing)\b/i);
+  if (mMatch) return parseFloat(mMatch[1].replace(',', '.')) * 1000000;
+  
+  // Thousand: 50k, 50 тысяч, 50 ming, 50 минг, 150ming
+  const kMatch = lower.match(/(\d+(?:[.,]\d+)?)\s*(?:k|к|тысяч|ming|минг)\b/i);
   if (kMatch) return parseFloat(kMatch[1].replace(',', '.')) * 1000;
+  
+  // Formatted numbers: 50,000 or 50 000
   const formattedMatch = text.match(/(\d{1,3}(?:[,\s]\d{3})+)/);
   if (formattedMatch) return parseInt(formattedMatch[1].replace(/[,\s]/g, ''));
+  
+  // Simple number (at least 100 UZS)
   const simpleMatch = text.match(/(\d+)/);
   if (simpleMatch && parseInt(simpleMatch[1]) >= 100) return parseInt(simpleMatch[1]);
+  
   return null;
 }
 
