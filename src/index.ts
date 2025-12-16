@@ -3,18 +3,19 @@
 // Smart Finance Tracker - ALL FEATURES FREE
 // ============================================
 
-import { Bot, session, InlineKeyboard } from 'grammy';
+import { Bot, Context, InlineKeyboard } from 'grammy';
 import { createClient } from '@supabase/supabase-js';
+import 'dotenv/config';
 
 // ============================================
 // CONFIGURATION
 // ============================================
 const config = {
-  BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN!,
-  SUPABASE_URL: process.env.SUPABASE_URL!,
-  SUPABASE_KEY: process.env.SUPABASE_ANON_KEY!,
-  OPENAI_API_KEY: process.env.OPENAI_API_KEY!,
-  WEBAPP_URL: 'https://t.me/hamyon_uz_bot/app',
+  BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN || '',
+  SUPABASE_URL: process.env.SUPABASE_URL || '',
+  SUPABASE_KEY: process.env.SUPABASE_ANON_KEY || '',
+  OPENAI_API_KEY: process.env.OPENAI_API_KEY || '',
+  WEBAPP_URL: process.env.WEBAPP_URL || 'https://t.me/hamyon_uz_bot/app',
 };
 
 const supabase = createClient(config.SUPABASE_URL, config.SUPABASE_KEY);
@@ -85,11 +86,6 @@ const CATEGORIES = {
 };
 
 // ============================================
-// SESSION
-// ============================================
-bot.use(session({ initial: () => ({ step: 'ready' }) }));
-
-// ============================================
 // DATABASE HELPERS
 // ============================================
 async function getOrCreateUser(telegramId: number, firstName: string, lastName?: string) {
@@ -142,7 +138,7 @@ async function getTodayStats(telegramId: number) {
   const today = new Date().toISOString().split('T')[0];
   const { data } = await supabase.from('transactions').select('amount').eq('user_telegram_id', telegramId).gte('created_at', today);
   let expenses = 0, income = 0;
-  (data || []).forEach(tx => { if (tx.amount < 0) expenses += Math.abs(tx.amount); else income += tx.amount; });
+  (data || []).forEach((tx: { amount: number }) => { if (tx.amount < 0) expenses += Math.abs(tx.amount); else income += tx.amount; });
   return { expenses, income, count: data?.length || 0 };
 }
 
@@ -162,7 +158,14 @@ function parseAmount(text: string): number | null {
   return null;
 }
 
-function detectCategory(text: string): { id: string; type: 'expense' | 'income'; category: any } {
+interface Category {
+  id: string;
+  name: string;
+  emoji: string;
+  keywords: string[];
+}
+
+function detectCategory(text: string): { id: string; type: 'expense' | 'income'; category: Category } {
   const lower = text.toLowerCase();
   for (const cat of CATEGORIES.income) {
     for (const kw of cat.keywords) { if (lower.includes(kw)) return { id: cat.id, type: 'income', category: cat }; }
@@ -174,9 +177,9 @@ function detectCategory(text: string): { id: string; type: 'expense' | 'income';
   return { id: 'other', type: 'expense', category: defaultCat };
 }
 
-function getCategoryById(id: string) {
+function getCategoryById(id: string): Category {
   const all = [...CATEGORIES.expense, ...CATEGORIES.income];
-  return all.find(c => c.id === id) || { id: 'other', name: 'Boshqa', emoji: '📦' };
+  return all.find(c => c.id === id) || { id: 'other', name: 'Boshqa', emoji: '📦', keywords: [] };
 }
 
 function formatMoney(amount: number): string {
@@ -235,8 +238,9 @@ async function extractReceiptData(imageUrl: string): Promise<{ amount: number; s
 // ============================================
 // BOT COMMANDS
 // ============================================
-bot.command('start', async (ctx) => {
-  await getOrCreateUser(ctx.from!.id, ctx.from!.first_name, ctx.from!.last_name);
+bot.command('start', async (ctx: Context) => {
+  if (!ctx.from) return;
+  await getOrCreateUser(ctx.from.id, ctx.from.first_name, ctx.from.last_name);
   const keyboard = new InlineKeyboard().webApp('📊 Hamyon ilovasini ochish', config.WEBAPP_URL);
   await ctx.reply(
     `👋 Salom! Men Hamyon - moliyaviy yordamchingizman.\n\n` +
@@ -249,9 +253,10 @@ bot.command('start', async (ctx) => {
   );
 });
 
-bot.command('balance', async (ctx) => {
-  const balance = await getBalance(ctx.from!.id);
-  const today = await getTodayStats(ctx.from!.id);
+bot.command('balance', async (ctx: Context) => {
+  if (!ctx.from) return;
+  const balance = await getBalance(ctx.from.id);
+  const today = await getTodayStats(ctx.from.id);
   const keyboard = new InlineKeyboard().webApp('📊 To\'liq ilova', config.WEBAPP_URL);
   await ctx.reply(
     `💰 *Balans: ${formatMoney(balance)}*\n\n📅 Bugun:\n↘️ Xarajat: ${formatMoney(today.expenses)}\n↗️ Daromad: ${formatMoney(today.income)}`,
@@ -259,7 +264,7 @@ bot.command('balance', async (ctx) => {
   );
 });
 
-bot.command('help', async (ctx) => {
+bot.command('help', async (ctx: Context) => {
   await ctx.reply(
     `🎙️ *Ovozli xabar:*\n1. Mikrofon tugmasini bosib turing\n2. "Kofe 15 ming" deb ayting\n3. Yuborish uchun qo'yib yuboring\n\n` +
     `💬 *Matn:* "Taksi 30000" deb yozing\n\n📷 *Chek:* Rasm yuboring`,
@@ -270,7 +275,8 @@ bot.command('help', async (ctx) => {
 // ============================================
 // VOICE MESSAGE HANDLER
 // ============================================
-bot.on('message:voice', async (ctx) => {
+bot.on('message:voice', async (ctx: Context) => {
+  if (!ctx.from || !ctx.message || !('voice' in ctx.message)) return;
   await ctx.reply('🎤 Qayta ishlanmoqda...');
   try {
     const file = await ctx.api.getFile(ctx.message.voice.file_id);
@@ -281,8 +287,8 @@ bot.on('message:voice', async (ctx) => {
     const { id: categoryId, type, category } = detectCategory(transcription);
     if (!amount) { await ctx.reply(`📝 Eshitdim: "${transcription}"\n\n❌ Summani aniqlab bo\'lmadi.`); return; }
     const finalAmount = type === 'expense' ? -Math.abs(amount) : Math.abs(amount);
-    await saveTransaction(ctx.from!.id, { description: transcription, amount: finalAmount, categoryId, source: 'voice' });
-    const balance = await getBalance(ctx.from!.id);
+    await saveTransaction(ctx.from.id, { description: transcription, amount: finalAmount, categoryId, source: 'voice' });
+    const balance = await getBalance(ctx.from.id);
     const keyboard = new InlineKeyboard().webApp('📊 Ilovani ochish', config.WEBAPP_URL);
     await ctx.reply(
       `✅ *Saqlandi!*\n\n${category.emoji} ${category.name}\n💸 ${formatMoney(Math.abs(finalAmount))}\n💰 Balans: ${formatMoney(balance)}`,
@@ -294,16 +300,18 @@ bot.on('message:voice', async (ctx) => {
 // ============================================
 // PHOTO HANDLER
 // ============================================
-bot.on('message:photo', async (ctx) => {
+bot.on('message:photo', async (ctx: Context) => {
+  if (!ctx.from || !ctx.message || !('photo' in ctx.message)) return;
   await ctx.reply('📷 Skanerlanmoqda...');
   try {
-    const file = await ctx.api.getFile(ctx.message.photo[ctx.message.photo.length - 1].file_id);
+    const photos = ctx.message.photo;
+    const file = await ctx.api.getFile(photos[photos.length - 1].file_id);
     const fileUrl = `https://api.telegram.org/file/bot${config.BOT_TOKEN}/${file.file_path}`;
     const receiptData = await extractReceiptData(fileUrl);
     if (!receiptData) { await ctx.reply('❌ Chekni o\'qib bo\'lmadi.'); return; }
     const { id: categoryId, category } = detectCategory(receiptData.store);
-    await saveTransaction(ctx.from!.id, { description: receiptData.store, amount: -Math.abs(receiptData.amount), categoryId, source: 'receipt' });
-    const balance = await getBalance(ctx.from!.id);
+    await saveTransaction(ctx.from.id, { description: receiptData.store, amount: -Math.abs(receiptData.amount), categoryId, source: 'receipt' });
+    const balance = await getBalance(ctx.from.id);
     const keyboard = new InlineKeyboard().webApp('📊 Ilovani ochish', config.WEBAPP_URL);
     await ctx.reply(
       `✅ *Chek qabul qilindi!*\n\n🏪 ${receiptData.store}\n💸 ${formatMoney(receiptData.amount)}\n${category.emoji} ${category.name}\n💰 Balans: ${formatMoney(balance)}`,
@@ -315,19 +323,34 @@ bot.on('message:photo', async (ctx) => {
 // ============================================
 // TEXT HANDLER
 // ============================================
-bot.on('message:text', async (ctx) => {
+bot.on('message:text', async (ctx: Context) => {
+  if (!ctx.from || !ctx.message || !('text' in ctx.message)) return;
   const text = ctx.message.text;
   if (text.startsWith('/')) return;
   const amount = parseAmount(text);
   const { id: categoryId, type, category } = detectCategory(text);
   if (!amount) { await ctx.reply('❌ Summani aniqlab bo\'lmadi.\n\n💡 Masalan: "Kofe 15000"'); return; }
   const finalAmount = type === 'expense' ? -Math.abs(amount) : Math.abs(amount);
-  await saveTransaction(ctx.from!.id, { description: text, amount: finalAmount, categoryId, source: 'text' });
-  const balance = await getBalance(ctx.from!.id);
+  await saveTransaction(ctx.from.id, { description: text, amount: finalAmount, categoryId, source: 'text' });
+  const balance = await getBalance(ctx.from.id);
   const keyboard = new InlineKeyboard().webApp('📊 Ilovani ochish', config.WEBAPP_URL);
   await ctx.reply(
     `✅ *Saqlandi!*\n\n${category.emoji} ${category.name}\n${type === 'expense' ? '💸' : '💰'} ${formatMoney(Math.abs(finalAmount))}\n💰 Balans: ${formatMoney(balance)}`,
     { parse_mode: 'Markdown', reply_markup: keyboard }
+  );
+});
+
+// ============================================
+// CALLBACK HANDLERS
+// ============================================
+bot.callbackQuery('view_balance', async (ctx) => {
+  if (!ctx.from) return;
+  const balance = await getBalance(ctx.from.id);
+  const today = await getTodayStats(ctx.from.id);
+  await ctx.answerCallbackQuery();
+  await ctx.reply(
+    `💰 *Balans: ${formatMoney(balance)}*\n\n📅 Bugun:\n↘️ Xarajat: ${formatMoney(today.expenses)}\n↗️ Daromad: ${formatMoney(today.income)}`,
+    { parse_mode: 'Markdown' }
   );
 });
 
