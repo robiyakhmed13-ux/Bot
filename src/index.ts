@@ -1,11 +1,11 @@
 // ============================================
-// HAMYON - TELEGRAM BOT (TypeScript, Railway webhook-ready)
+// HAMYON - TELEGRAM BOT (TypeScript, Railway-ready)
+// Smart Finance Tracker - ALL FEATURES FREE
 // ============================================
 
-import "dotenv/config";
-import express from "express";
-import { Bot, InlineKeyboard, Context, webhookCallback } from "grammy";
+import { Bot, InlineKeyboard, Context } from "grammy";
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
+import "dotenv/config";
 
 // ----------------------------
 // CONFIG
@@ -13,19 +13,11 @@ import { createClient, SupabaseClient } from "@supabase/supabase-js";
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN ?? "";
 const SUPABASE_URL = process.env.SUPABASE_URL ?? "";
 const SUPABASE_KEY = process.env.SUPABASE_ANON_KEY ?? "";
-const WEBAPP_URL = process.env.WEBAPP_URL ?? "https://hamyon-rose.vercel.app/";
-const PUBLIC_URL = (process.env.PUBLIC_URL ?? "").replace(/\/+$/, "");
-const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET ?? "";
-const PORT = Number(process.env.PORT ?? 8080);
+const WEBAPP_URL = process.env.WEBAPP_URL ?? "https://t.me/hamyonmoneybot/";
 
 if (!BOT_TOKEN) throw new Error("Missing TELEGRAM_BOT_TOKEN");
 if (!SUPABASE_URL) throw new Error("Missing SUPABASE_URL");
 if (!SUPABASE_KEY) throw new Error("Missing SUPABASE_ANON_KEY");
-if (!PUBLIC_URL) throw new Error("Missing PUBLIC_URL (https://your-railway-domain)");
-if (!WEBHOOK_SECRET) throw new Error("Missing WEBHOOK_SECRET");
-
-const WEBHOOK_PATH = `/telegram/webhook/${WEBHOOK_SECRET}`;
-const WEBHOOK_URL = `${PUBLIC_URL}${WEBHOOK_PATH}`;
 
 const supabase: SupabaseClient = createClient(SUPABASE_URL, SUPABASE_KEY);
 const bot = new Bot(BOT_TOKEN);
@@ -52,20 +44,23 @@ type UserRow = {
 };
 
 // ----------------------------
-// CATEGORIES (demo - keep your full list)
+// CATEGORIES (short demo - keep your full list)
 // ----------------------------
 const CATEGORIES: { expense: Category[]; income: Category[] } = {
   expense: [
     { id: "accessories", name: "Aksessuarlar", emoji: "👜", keywords: ["bag", "sumka", "wallet", "hamyon", "watch", "soat"] },
     { id: "food", name: "Oziq-ovqat", emoji: "🍕", keywords: ["food", "grocery", "oziq", "ovqat"] },
     { id: "taxi", name: "Taksi", emoji: "🚕", keywords: ["taxi", "taksi", "yandex"] },
-    { id: "other", name: "Boshqa", emoji: "📦", keywords: ["other", "boshqa"] },
+    { id: "other", name: "Boshqa", emoji: "📦", keywords: ["other", "boshqa"] }
   ],
   income: [
     { id: "salary", name: "Oylik maosh", emoji: "💰", keywords: ["salary", "oylik", "maosh"] },
-    { id: "other_income", name: "Boshqa daromad", emoji: "💵", keywords: ["income", "daromad"] },
-  ],
+    { id: "other_income", name: "Boshqa daromad", emoji: "💵", keywords: ["income", "daromad"] }
+  ]
 };
+
+// If you have 45+ categories, paste them here.
+// IMPORTANT: categoryId in transactions must be VARCHAR(50) like "accessories".
 
 function getCategoryById(id: string): Category {
   const all = [...CATEGORIES.expense, ...CATEGORIES.income];
@@ -73,7 +68,7 @@ function getCategoryById(id: string): Category {
 }
 
 // ----------------------------
-// DB HELPERS
+// DB HELPERS (match your schema)
 // ----------------------------
 async function getOrCreateUser(telegramId: number, firstName: string, lastName?: string): Promise<UserRow> {
   const { data: existing, error: e1 } = await supabase
@@ -113,26 +108,23 @@ async function saveTransaction(telegramId: number, tx: TxInsert): Promise<void> 
     description: tx.description,
     amount: tx.amount,
     category_id: tx.categoryId,
-    source: tx.source,
+    source: tx.source
   });
 
   if (error) throw error;
 
+  // ✅ your SQL defines this
   const { error: rpcErr } = await supabase.rpc("update_balance", {
     p_telegram_id: telegramId,
-    p_amount: Math.trunc(tx.amount),
+    p_amount: Math.trunc(tx.amount)
   });
-
   if (rpcErr) console.error("update_balance rpc error:", rpcErr);
 }
 
 async function getTodayStats(telegramId: number): Promise<TodayStats> {
-  const { data, error } = (await supabase.rpc("get_today_stats", {
-    p_telegram_id: telegramId,
-  })) as unknown as {
-    data: { total_expenses: number; total_income: number; transaction_count: number }[] | null;
-    error: unknown;
-  };
+  const { data, error } = await supabase.rpc("get_today_stats", {
+    p_telegram_id: telegramId
+  }) as { data: { total_expenses: number; total_income: number; transaction_count: number }[] | null; error: unknown };
 
   if (error) console.error("get_today_stats error:", error);
 
@@ -140,7 +132,7 @@ async function getTodayStats(telegramId: number): Promise<TodayStats> {
   return {
     expenses: Number(row?.total_expenses ?? 0),
     income: Number(row?.total_income ?? 0),
-    count: Number(row?.transaction_count ?? 0),
+    count: Number(row?.transaction_count ?? 0)
   };
 }
 
@@ -190,7 +182,7 @@ function detectCategory(text: string): CategoryDetect {
 }
 
 // ----------------------------
-// CATEGORY → AMOUNT FLOW
+// CATEGORY → AMOUNT FLOW (what you asked)
 // ----------------------------
 const pendingCategory = new Map<number, { categoryId: string; type: "expense" | "income" }>();
 
@@ -229,6 +221,7 @@ bot.command("balance", async (ctx: Context) => {
   );
 });
 
+// open expense picker
 bot.callbackQuery("open_expenses", async (ctx) => {
   const kb = new InlineKeyboard();
   for (const c of CATEGORIES.expense) kb.text(`${c.emoji} ${c.name}`, `pick_exp:${c.id}`).row();
@@ -236,6 +229,7 @@ bot.callbackQuery("open_expenses", async (ctx) => {
   await ctx.reply("🧾 Xarajat kategoriyasini tanlang:", { reply_markup: kb });
 });
 
+// open income picker
 bot.callbackQuery("open_income", async (ctx) => {
   const kb = new InlineKeyboard();
   for (const c of CATEGORIES.income) kb.text(`${c.emoji} ${c.name}`, `pick_inc:${c.id}`).row();
@@ -243,10 +237,10 @@ bot.callbackQuery("open_income", async (ctx) => {
   await ctx.reply("💰 Daromad kategoriyasini tanlang:", { reply_markup: kb });
 });
 
+// pick expense category
 bot.callbackQuery(/^pick_exp:(.+)$/i, async (ctx) => {
   const from = ctx.from;
   if (!from) return;
-
   const categoryId = String(ctx.match[1]);
   pendingCategory.set(from.id, { categoryId, type: "expense" });
 
@@ -255,10 +249,10 @@ bot.callbackQuery(/^pick_exp:(.+)$/i, async (ctx) => {
   await ctx.reply(`✅ ${cat.emoji} ${cat.name}\n\nEndi summani yuboring.\nMasalan: 500000 yoki 500k`);
 });
 
+// pick income category
 bot.callbackQuery(/^pick_inc:(.+)$/i, async (ctx) => {
   const from = ctx.from;
   if (!from) return;
-
   const categoryId = String(ctx.match[1]);
   pendingCategory.set(from.id, { categoryId, type: "income" });
 
@@ -267,12 +261,14 @@ bot.callbackQuery(/^pick_inc:(.+)$/i, async (ctx) => {
   await ctx.reply(`✅ ${cat.emoji} ${cat.name}\n\nEndi summani yuboring.\nMasalan: 2m yoki 1500000`);
 });
 
+// text handler
 bot.on("message:text", async (ctx: Context) => {
   const from = ctx.from;
   const text = ctx.message?.text;
   if (!from || !text) return;
   if (text.startsWith("/")) return;
 
+  // ✅ If user already picked category → treat text as amount only
   const pending = pendingCategory.get(from.id);
   if (pending) {
     const amount = parseAmount(text);
@@ -288,20 +284,19 @@ bot.on("message:text", async (ctx: Context) => {
       description: cat.name,
       amount: finalAmount,
       categoryId: pending.categoryId,
-      source: "manual",
+      source: "manual"
     });
 
     pendingCategory.delete(from.id);
 
     const bal = await getBalance(from.id);
     await ctx.reply(
-      `✅ Saqlandi!\n\n${cat.emoji} ${cat.name}\n${pending.type === "expense" ? "💸" : "💰"} ${formatMoney(
-        Math.abs(finalAmount)
-      )}\n💰 Balans: ${formatMoney(bal)}`
+      `✅ Saqlandi!\n\n${cat.emoji} ${cat.name}\n${pending.type === "expense" ? "💸" : "💰"} ${formatMoney(Math.abs(finalAmount))}\n💰 Balans: ${formatMoney(bal)}`
     );
     return;
   }
 
+  // Otherwise, allow "Accessories 500000" style
   const amount = parseAmount(text);
   if (!amount) {
     await ctx.reply("❌ Summani aniqlab bo'lmadi.\nMasalan: 'Taksi 30000' yoki avval kategoriya tanlang.");
@@ -315,41 +310,19 @@ bot.on("message:text", async (ctx: Context) => {
     description: text,
     amount: finalAmount,
     categoryId,
-    source: "text",
+    source: "text"
   });
 
   const bal = await getBalance(from.id);
   await ctx.reply(
-    `✅ Saqlandi!\n\n${category.emoji} ${category.name}\n${type === "expense" ? "💸" : "💰"} ${formatMoney(
-      Math.abs(finalAmount)
-    )}\n💰 Balans: ${formatMoney(bal)}`
+    `✅ Saqlandi!\n\n${category.emoji} ${category.name}\n${type === "expense" ? "💸" : "💰"} ${formatMoney(Math.abs(finalAmount))}\n💰 Balans: ${formatMoney(bal)}`
   );
 });
 
 // ----------------------------
-// WEBHOOK SERVER
+// START
 // ----------------------------
 bot.catch((err) => console.error("Bot error:", err));
+console.log("🚀 Hamyon Bot ishga tushdi...");
+bot.start();
 
-async function main() {
-  // 1) Make Telegram send updates to Railway URL
-  await bot.api.setWebhook(WEBHOOK_URL);
-
-  const app = express();
-
-  // 2) Optional health check
-  app.get("/", (_req, res) => res.json({ ok: true, webhook: WEBHOOK_URL }));
-
-  // 3) Webhook endpoint
-  app.post(WEBHOOK_PATH, webhookCallback(bot, "express"));
-
-  app.listen(PORT, () => {
-    console.log("🚀 Hamyon webhook bot running on port:", PORT);
-    console.log("✅ Webhook:", WEBHOOK_URL);
-  });
-}
-
-main().catch((e) => {
-  console.error("Startup error:", e);
-  process.exit(1);
-});
