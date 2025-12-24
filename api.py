@@ -1,120 +1,162 @@
 import os
-from datetime import datetime, timezone
-from typing import Optional
+import csv
+import io
+from datetime import date, datetime, timedelta, timezone
 
-import psycopg
-from psycopg_pool import ConnectionPool
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, HTTPException, Header, Response
 from pydantic import BaseModel
 
-DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
-if not DATABASE_URL:
-    raise ValueError("Missing DATABASE_URL")
+from db import ensure_user, fetchall, fetchone, execute
 
-pool = ConnectionPool(conninfo=DATABASE_URL, min_size=1, max_size=5, open=True)
+app = FastAPI(title="Hamyon API")
 
-app = FastAPI()
+# VERY IMPORTANT:
+# For real security, verify Telegram initData.
+# For now we use a simple shared secret header for bot/app.
+API_SECRET = os.getenv("API_SECRET", "")
 
-# allow your Vercel miniapp domain
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # tighten later to your real domain
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+def check_secret(x_api_secret: str | None):
+    if API_SECRET and x_api_secret != API_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
-class TxIn(BaseModel):
+
+class TxCreate(BaseModel):
     telegram_id: int
-    name: str = "User"
-    description: str
-    amount: int
-    category_id: str
-    source: str = "app"
-    created_at: Optional[str] = None  # ISO
+    type: str                 # expense|income|debt
+    amount: int               # positive
+    category_key: str
+    description: str | None = None
+    source: str = "manual"    # manual|text|voice|receipt
 
-def ensure_user(telegram_id: int, name: str) -> tuple:
-    with pool.connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT id, balance FROM public.users WHERE telegram_id=%s", (telegram_id,))
-            row = cur.fetchone()
-            if row:
-                return row
-            cur.execute(
-                "INSERT INTO public.users (telegram_id, name) VALUES (%s,%s) RETURNING id, balance",
-                (telegram_id, name),
-            )
-            row = cur.fetchone()
-        conn.commit()
-    return row
 
-@app.get("/api/sync")
-def sync(telegram_id: int):
-    user_row = None
-    with pool.connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT id, telegram_id, name, balance, language FROM public.users WHERE telegram_id=%s", (telegram_id,))
-            user_row = cur.fetchone()
+@app.get("/health")
+async def health():
+    return {"ok": True}
 
-            if not user_row:
-                return {"user": None, "transactions": []}
 
-            cur.execute(
-                """
-                SELECT id, description, amount, category_id, source, created_at
-                FROM public.transactions
-                WHERE user_telegram_id=%s
-                ORDER BY created_at DESC
-                LIMIT 200
-                """,
-                (telegram_id,),
-            )
-            tx = cur.fetchall()
+@app.post("/transactions")
+async def create_transaction(payload: TxCreate, x_api_secret: str | None = Header(default=None)):
+    check_secret(x_api_secret)
 
-    user = {"id": str(user_row[0]), "telegram_id": user_row[1], "name": user_row[2], "balance": user_row[3], "language": user_row[4]}
-    transactions = [
+    if payload.type not in ("expense", "income", "debt"):
+        raise HTTPException(400, "Invalid type")
+    if payload.amount <= 0:
+        raise HTTPException(400, "Amount must be > 0")
+
+    user_id = await ensure_user(payload.telegram_id)
+
+    await execute(
+        """
+        INSERT INTO transactions (user_id, type, amount, category_key, description, source)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        """,
+        (user_id, payload.type, payload.amount, payload.category_key, payload.description, payload.source),
+    )
+    return {"ok": True}
+
+
+@app.get("/transactions")
+async def list_transactions(telegram_id: int, limit: int = 100, x_api_secret: str | None = Header(default=None)):
+    check_secret(x_api_secret)
+
+    user_id = await ensure_user(telegram_id)
+    rows = await fetchall(
+        """
+        SELECT id, type, amount, category_key, description, source, created_at
+        FROM transactions
+        WHERE user_id=%s
+        ORDER BY created_at DESC
+        LIMIT %s
+        """,
+        (user_id, limit),
+    )
+    return [
         {
-            "id": str(r[0]),
-            "description": r[1],
-            "amount": r[2],
-            "category_id": r[3],
-            "source": r[4],
-            "created_at": r[5].isoformat() if r[5] else None,
+            "id": r[0], "type": r[1], "amount": r[2], "category_key": r[3],
+            "description": r[4], "source": r[5], "created_at": r[6].isoformat()
         }
-        for r in tx
+        for r in rows
     ]
-    return {"user": user, "transactions": transactions}
 
-@app.post("/api/transactions")
-def create_tx(payload: TxIn):
-    user_id, _bal = ensure_user(payload.telegram_id, payload.name)
 
-    created_at = datetime.now(timezone.utc)
-    if payload.created_at:
-        try:
-            created_at = datetime.fromisoformat(payload.created_at.replace("Z", "+00:00"))
-        except:
-            pass
+def day_bounds_utc():
+    now = datetime.now(timezone.utc)
+    start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+    end = start + timedelta(days=1)
+    return start, end
 
-    with pool.connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO public.transactions
-                  (user_id, user_telegram_id, description, amount, category_id, source, created_at)
-                VALUES (%s,%s,%s,%s,%s,%s,%s)
-                RETURNING id
-                """,
-                (user_id, payload.telegram_id, payload.description, payload.amount, payload.category_id, payload.source, created_at),
-            )
-            tx_id = cur.fetchone()[0]
 
-            cur.execute(
-                "UPDATE public.users SET balance = balance + %s, updated_at=NOW() WHERE id=%s RETURNING balance",
-                (payload.amount, user_id),
-            )
-            new_balance = cur.fetchone()[0]
-        conn.commit()
+@app.get("/stats/today")
+async def stats_today(telegram_id: int, x_api_secret: str | None = Header(default=None)):
+    check_secret(x_api_secret)
 
-    return {"id": str(tx_id), "balance": int(new_balance)}
+    user_id = await ensure_user(telegram_id)
+    start, end = day_bounds_utc()
+
+    rows = await fetchall(
+        """
+        SELECT type, COALESCE(SUM(amount),0) AS total, COUNT(*)
+        FROM transactions
+        WHERE user_id=%s AND created_at >= %s AND created_at < %s
+        GROUP BY type
+        """,
+        (user_id, start, end),
+    )
+
+    out = {"expense": 0, "income": 0, "debt": 0, "count": 0}
+    for t, total, cnt in rows:
+        out[t] = int(total)
+        out["count"] += int(cnt)
+    return out
+
+
+@app.get("/stats/range")
+async def stats_range(telegram_id: int, days: int = 7, x_api_secret: str | None = Header(default=None)):
+    check_secret(x_api_secret)
+
+    user_id = await ensure_user(telegram_id)
+    now = datetime.now(timezone.utc)
+    start = now - timedelta(days=days)
+
+    rows = await fetchall(
+        """
+        SELECT type, COALESCE(SUM(amount),0) AS total
+        FROM transactions
+        WHERE user_id=%s AND created_at >= %s
+        GROUP BY type
+        """,
+        (user_id, start),
+    )
+
+    out = {"expense": 0, "income": 0, "debt": 0}
+    for t, total in rows:
+        out[t] = int(total)
+    return out
+
+
+@app.get("/export/csv")
+async def export_csv(telegram_id: int, x_api_secret: str | None = Header(default=None)):
+    check_secret(x_api_secret)
+
+    user_id = await ensure_user(telegram_id)
+    rows = await fetchall(
+        """
+        SELECT id, type, amount, category_key, COALESCE(description,''), source, created_at
+        FROM transactions
+        WHERE user_id=%s
+        ORDER BY created_at DESC
+        """,
+        (user_id,),
+    )
+
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["id","type","amount","category","description","source","created_at"])
+    for r in rows:
+        w.writerow([r[0], r[1], r[2], r[3], r[4], r[5], r[6].isoformat()])
+
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=transactions.csv"},
+    )
