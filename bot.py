@@ -18,12 +18,17 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+SUPABASE_KEY = (
+    os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    or os.getenv("SUPABASE_SECRET_KEY")
+    or os.getenv("SUPABASE_ANON_KEY", "")
+)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 WEBAPP_URL = os.getenv("WEBAPP_URL", "https://your-app.vercel.app")
-
 if not BOT_TOKEN: raise ValueError("Missing TELEGRAM_BOT_TOKEN")
 if not SUPABASE_URL or not SUPABASE_KEY: raise ValueError("Missing Supabase credentials")
+
+logger.info("Supabase key prefix in use: %s", (SUPABASE_KEY or "")[:10])
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 openai_client = None
