@@ -1,102 +1,219 @@
 import os
-import psycopg
-from psycopg_pool import AsyncConnectionPool
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+import httpx
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+
+from nlp import parse_quick_add
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-DATABASE_URL = os.getenv("DATABASE_URL")
+API_URL = os.getenv("API_URL")          # e.g. https://your-api.up.railway.app
+API_SECRET = os.getenv("API_SECRET","") # must match API
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY","")  # optional voice
 
 if not TOKEN:
     raise ValueError("Missing TELEGRAM_BOT_TOKEN")
-
-if not DATABASE_URL:
-    raise ValueError("Missing DATABASE_URL")
-
-pool = AsyncConnectionPool(DATABASE_URL, open=True)
+if not API_URL:
+    raise ValueError("Missing API_URL")
 
 
-CREATE_TABLES_SQL = """
-CREATE TABLE IF NOT EXISTS users (
-    telegram_id BIGINT PRIMARY KEY,
-    name TEXT,
-    balance BIGINT DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS transactions (
-    id SERIAL PRIMARY KEY,
-    telegram_id BIGINT REFERENCES users(telegram_id),
-    amount BIGINT NOT NULL,
-    created_at TIMESTAMP DEFAULT now()
-);
-"""
+def kb_main():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 1 day", callback_data="stats:1"),
+         InlineKeyboardButton("📆 7 days", callback_data="stats:7")],
+        [InlineKeyboardButton("🗓 30 days", callback_data="stats:30"),
+         InlineKeyboardButton("⬇️ CSV", callback_data="csv")],
+    ])
 
 
-async def init_db():
-    async with pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(CREATE_TABLES_SQL)
+async def api_post(path: str, json: dict):
+    headers = {"X-API-SECRET": API_SECRET} if API_SECRET else {}
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(f"{API_URL}{path}", json=json, headers=headers)
+        r.raise_for_status()
+        return r.json()
 
+async def api_get(path: str, params: dict):
+    headers = {"X-API-SECRET": API_SECRET} if API_SECRET else {}
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(f"{API_URL}{path}", params=params, headers=headers)
+        r.raise_for_status()
+        return r
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "✅ Hamyon bot ishlayapti.\n\n"
+        "Tez qo‘shish: `food 97500` yoki `transport 12000 taxi`\n"
+        "Buyruqlar:\n"
+        "/add <category> <amount> [desc]\n"
+        "/today\n"
+        "/range 7\n"
+        "/csv\n",
+        parse_mode="Markdown",
+        reply_markup=kb_main(),
+    )
+
+async def add_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg_id = update.effective_user.id
-    name = update.effective_user.first_name
+    if len(context.args) < 2:
+        await update.message.reply_text("Misol: /add food 97500 lunch")
+        return
+    category_key = context.args[0]
+    amount = int("".join([c for c in context.args[1] if c.isdigit()]))
+    desc = " ".join(context.args[2:]) if len(context.args) > 2 else None
 
-    async with pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                "INSERT INTO users (telegram_id, name) VALUES (%s, %s) "
-                "ON CONFLICT (telegram_id) DO NOTHING",
-                (tg_id, name),
-            )
+    await api_post("/transactions", {
+        "telegram_id": tg_id,
+        "type": "expense",
+        "amount": amount,
+        "category_key": category_key,
+        "description": desc,
+        "source": "manual"
+    })
+    await update.message.reply_text("✅ Saqlandi!", reply_markup=kb_main())
 
-    await update.message.reply_text("✅ Bot is connected to PostgreSQL!")
-
-
-async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg_id = update.effective_user.id
-    amount = int(context.args[0])
+    r = await api_get("/stats/today", {"telegram_id": tg_id})
+    data = r.json()
+    msg = (
+        f"📊 Bugun:\n"
+        f"Xarajat: {data['expense']} UZS\n"
+        f"Daromad: {data['income']} UZS\n"
+        f"Qarz: {data['debt']} UZS\n"
+        f"Tranzaksiya: {data['count']}"
+    )
+    await update.message.reply_text(msg, reply_markup=kb_main())
 
-    async with pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                "INSERT INTO transactions (telegram_id, amount) VALUES (%s, %s)",
-                (tg_id, amount),
-            )
-            await cur.execute(
-                "UPDATE users SET balance = balance + %s WHERE telegram_id = %s",
-                (amount, tg_id),
-            )
-
-    await update.message.reply_text(f"💸 Added {amount}")
-
-
-async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def range_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg_id = update.effective_user.id
+    days = int(context.args[0]) if context.args else 7
+    r = await api_get("/stats/range", {"telegram_id": tg_id, "days": days})
+    data = r.json()
+    msg = (
+        f"📆 {days} days:\n"
+        f"Xarajat: {data['expense']} UZS\n"
+        f"Daromad: {data['income']} UZS\n"
+        f"Qarz: {data['debt']} UZS"
+    )
+    await update.message.reply_text(msg, reply_markup=kb_main())
 
-    async with pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                "SELECT balance FROM users WHERE telegram_id = %s",
-                (tg_id,),
-            )
-            row = await cur.fetchone()
+async def csv_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tg_id = update.effective_user.id
+    r = await api_get("/export/csv", {"telegram_id": tg_id})
+    await update.message.reply_document(
+        document=r.content,
+        filename="transactions.csv",
+        caption="⬇️ CSV export"
+    )
 
-    bal = row[0] if row else 0
-    await update.message.reply_text(f"💰 Balance: {bal}")
+async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    tg_id = q.from_user.id
+    data = q.data
+
+    if data.startswith("stats:"):
+        days = int(data.split(":")[1])
+        if days == 1:
+            r = await api_get("/stats/today", {"telegram_id": tg_id})
+            d = r.json()
+            text = f"📊 1 day\nXarajat: {d['expense']} UZS\nDaromad: {d['income']} UZS\nQarz: {d['debt']} UZS\nTranzaksiya: {d['count']}"
+        else:
+            r = await api_get("/stats/range", {"telegram_id": tg_id, "days": days})
+            d = r.json()
+            text = f"📆 {days} days\nXarajat: {d['expense']} UZS\nDaromad: {d['income']} UZS\nQarz: {d['debt']} UZS"
+        await q.edit_message_text(text, reply_markup=kb_main())
+        return
+
+    if data == "csv":
+        r = await api_get("/export/csv", {"telegram_id": tg_id})
+        await q.message.reply_document(document=r.content, filename="transactions.csv", caption="⬇️ CSV export")
+        return
+
+async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # NLP quick-add: "food 97500 lunch"
+    tg_id = update.effective_user.id
+    text = (update.message.text or "").strip()
+    parsed = parse_quick_add(text)
+    if not parsed:
+        return
+
+    cat, amount, desc = parsed
+    await api_post("/transactions", {
+        "telegram_id": tg_id,
+        "type": "expense",
+        "amount": amount,
+        "category_key": cat,
+        "description": desc,
+        "source": "text"
+    })
+    await update.message.reply_text("✅ Saqlandi!", reply_markup=kb_main())
+
+
+# -------- Voice -> text (optional) --------
+async def transcribe_voice(file_bytes: bytes) -> str | None:
+    if not OPENAI_API_KEY:
+        return None
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        # Whisper-style transcription
+        resp = client.audio.transcriptions.create(
+            model="gpt-4o-mini-transcribe",
+            file=("voice.ogg", file_bytes),
+        )
+        return resp.text
+    except Exception:
+        return None
+
+async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tg_id = update.effective_user.id
+    voice = update.message.voice
+    if not voice:
+        return
+
+    f = await context.bot.get_file(voice.file_id)
+    b = await f.download_as_bytearray()
+
+    text = await transcribe_voice(bytes(b))
+    if not text:
+        await update.message.reply_text("🎙 Ovozni o‘qish uchun OPENAI_API_KEY kerak.")
+        return
+
+    parsed = parse_quick_add(text)
+    if not parsed:
+        await update.message.reply_text(f"🎙 Matn: {text}\n\n❌ Tushunmadim. Misol: 'food 97500'")
+        return
+
+    cat, amount, desc = parsed
+    await api_post("/transactions", {
+        "telegram_id": tg_id,
+        "type": "expense",
+        "amount": amount,
+        "category_key": cat,
+        "description": desc or f"(voice) {text}",
+        "source": "voice"
+    })
+    await update.message.reply_text(f"🎙 {text}\n✅ Saqlandi!", reply_markup=kb_main())
 
 
 async def main():
-    await init_db()
-
     app = Application.builder().token(TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("add", add))
-    app.add_handler(CommandHandler("balance", balance))
+    app.add_handler(CommandHandler("add", add_cmd))
+    app.add_handler(CommandHandler("today", today))
+    app.add_handler(CommandHandler("range", range_cmd))
+    app.add_handler(CommandHandler("csv", csv_cmd))
 
-    print("🚀 Bot started")
-    await app.run_polling()
+    app.add_handler(CallbackQueryHandler(on_callback))
 
+    app.add_handler(MessageHandler(filters.VOICE, on_voice))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+
+    await app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     import asyncio
