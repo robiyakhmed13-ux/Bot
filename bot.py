@@ -80,28 +80,24 @@ def db_first_row(table: str, select_cols: str, where_key: str, where_val):
     return data[0] if len(data) else None
 
 
-async def ensure_user(telegram_id: int, name: str) -> dict:
-    """
-    Ensures public.users row exists. Returns full row (id, telegram_id, balance, language, name).
-    """
-    user = db_first_row("users", "id,telegram_id,balance,language,name", "telegram_id", telegram_id)
+async def ensure_user(telegram_id: int, display_name: str) -> dict:
+    # Only request columns that actually exist
+    user = db_first_row("users", "id,telegram_id,balance,language", "telegram_id", telegram_id)
     if user:
         return user
 
-    # create then re-fetch
+    # Insert WITHOUT name (because your table doesn't have it)
     supabase.table("users").insert({
         "telegram_id": telegram_id,
-        "name": name,
         "balance": 0,
         "language": "uz",
     }).execute()
 
-    user = db_first_row("users", "id,telegram_id,balance,language,name", "telegram_id", telegram_id)
+    user = db_first_row("users", "id,telegram_id,balance,language", "telegram_id", telegram_id)
     if not user:
         raise RuntimeError("Failed to create user in public.users")
     return user
-
-
+    
 async def update_balance(telegram_id: int, delta: int) -> int:
     user = db_first_row("users", "telegram_id,balance", "telegram_id", telegram_id)
     if not user:
