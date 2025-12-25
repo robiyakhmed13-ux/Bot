@@ -552,11 +552,12 @@ def main():
     app.add_handler(CommandHandler("csv", csv_cmd))
 
     app.add_handler(CallbackQueryHandler(on_callback))
+
     app.add_handler(MessageHandler(filters.VOICE, on_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
-    # IMPORTANT: run_polling is NOT awaited
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
+main()
