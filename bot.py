@@ -1,4 +1,3 @@
-# bot.py
 import os
 import re
 import httpx
@@ -17,7 +16,7 @@ from nlp import parse_quick_add
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 API_URL = os.getenv("API_URL")          # e.g. https://your-api.up.railway.app
 API_SECRET = os.getenv("API_SECRET", "")  # optional shared secret with API
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")  # optional for voice transcription
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")  # optional voice
 
 if not TOKEN:
     raise ValueError("Missing TELEGRAM_BOT_TOKEN")
@@ -83,12 +82,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 def _parse_amount(s: str) -> int:
-    # allows: 97_500, 97 500, 97500, 97k, 97.5k (basic)
-    s = s.strip().lower()
-    s = s.replace(" ", "").replace("_", "")
+    s = s.strip().lower().replace(" ", "").replace("_", "")
     m = re.match(r"^(\d+(?:\.\d+)?)(k)?$", s)
     if not m:
-        # fallback: keep digits only
         digits = "".join(ch for ch in s if ch.isdigit())
         if not digits:
             raise ValueError("Bad amount")
@@ -275,7 +271,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------
-# START (IMPORTANT FIX)
+# START (NO ASYNCIO.RUN!)
 # ---------------------------
 def main():
     app = Application.builder().token(TOKEN).build()
@@ -291,7 +287,7 @@ def main():
     app.add_handler(MessageHandler(filters.VOICE, on_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
-    # ✅ DO NOT asyncio.run() / DO NOT await
+    # ✅ This is correct for Railway/container
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
