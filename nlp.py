@@ -1,32 +1,62 @@
 import re
 
-ALLOWED = {
-    "food", "transport", "home", "bills", "health", "shopping", "gift", "education", "fun", "other",
-    "salary", "bonus",
+CAT_ALIASES = {
+  # uz
+  "ovqat":"food", "oziq":"food", "restoran":"food", "kafe":"food",
+  "taksi":"transport", "transport":"transport", "metro":"transport",
+  "ijara":"rent", "komunal":"bills", "telefon":"bills", "internet":"bills",
+  "dori":"health", "apteka":"health",
+  # ru
+  "еда":"food", "такси":"transport", "транспорт":"transport",
+  "аренда":"rent", "коммуналка":"bills", "связь":"bills",
+  # en
+  "food":"food", "taxi":"transport", "rent":"rent", "bills":"bills"
 }
 
-def parse_quick_add(text: str):
+def normalize_cat(word: str) -> str:
+    w = (word or "").strip().lower()
+    return CAT_ALIASES.get(w, w)
+
+AMOUNT_RE = re.compile(r"(\d[\d\s.,]*)")
+
+def parse_single_line(text: str):
     """
     Examples:
-      "food 97500"
-      "transport 12000 taxi"
-    Returns: (category_key, amount, desc) or None
+      "taksi 20000"
+      "ovqat 97 500 lunch"
+    Returns: (cat, amount:int, desc|None) or None
     """
-    if not text:
+    s = (text or "").strip()
+    if not s:
         return None
-
-    parts = text.strip().split()
+    parts = s.split()
     if len(parts) < 2:
         return None
-
-    cat = parts[0].lower()
-    if cat not in ALLOWED:
+    cat = normalize_cat(parts[0])
+    m = AMOUNT_RE.search(s)
+    if not m:
         return None
-
-    amount_str = re.sub(r"[^\d]", "", parts[1])
-    if not amount_str:
-        return None
-
-    amount = int(amount_str)
-    desc = " ".join(parts[2:]).strip() if len(parts) > 2 else None
+    raw = m.group(1)
+    amount = int(re.sub(r"[^\d]", "", raw))
+    # desc = everything after amount match
+    desc = s[m.end():].strip()
+    if desc == "":
+        desc = None
     return (cat, amount, desc)
+
+def parse_multi(text: str):
+    """
+    Very simple multi-item split:
+      "taksi 20000, ovqat 85000"
+    returns list of (cat, amount, desc)
+    """
+    s = (text or "").strip()
+    if not s:
+        return []
+    chunks = re.split(r"[,\n;]+", s)
+    out = []
+    for ch in chunks:
+        p = parse_single_line(ch.strip())
+        if p:
+            out.append(p)
+    return out
