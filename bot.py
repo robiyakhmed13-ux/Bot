@@ -2,430 +2,476 @@ import os
 import re
 import httpx
 from telegram import (
-    Update,
-    ReplyKeyboardMarkup,
-    KeyboardButton,
-    ReplyKeyboardRemove,
-    WebAppInfo,
+    Update, ReplyKeyboardMarkup, KeyboardButton,
+    InlineKeyboardMarkup, InlineKeyboardButton
 )
 from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    ConversationHandler,
-    ContextTypes,
-    filters,
+    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
+    ContextTypes, filters
 )
 
-from nlp import parse_quick_add
+from i18n import t
+from nlp import parse_single_line, normalize_cat
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-API_URL = (os.getenv("API_URL") or "").rstrip("/")          # e.g. https://your-api.up.railway.app
-API_SECRET = os.getenv("API_SECRET", "")
-WEBAPP_URL = os.getenv("WEBAPP_URL", "")                    # your mini app URL
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")           # optional
+API_URL = os.getenv("API_URL")          # https://your-api.up.railway.app
+API_SECRET = os.getenv("API_SECRET","")
+WEBAPP_URL = os.getenv("WEBAPP_URL","") # optional mini-app link
 
 if not TOKEN:
     raise ValueError("Missing TELEGRAM_BOT_TOKEN")
 if not API_URL:
     raise ValueError("Missing API_URL")
 
-# -----------------------------
-# Menu labels (Uzbek)
-# -----------------------------
-BTN_APP = "📱 Ilova"
-BTN_EXPENSE = "➖ Xarajat"
-BTN_INCOME = "➕ Daromad"
-BTN_DEBT = "📄 Qarz"
-BTN_REPORTS = "📊 Hisobot"
-BTN_SETTINGS = "⚙️ Sozlama"
-BTN_CANCEL = "❌ Bekor qilish"
-
-BTN_TODAY = "📅 Bugun"
-BTN_7 = "🗓 7 kun"
-BTN_30 = "🗓 30 kun"
-BTN_CSV = "⬇️ CSV"
-
-# Categories (label -> key)
-CATS_EXPENSE = [
-    ("🍕 Oziq-ovqat", "food"),
-    ("🚕 Transport", "transport"),
-    ("🏠 Uy", "home"),
-    ("🧾 Kommunal", "bills"),
-    ("💊 Dori", "health"),
-    ("🛍 Xarid", "shopping"),
-    ("🎁 Sovg'a", "gift"),
-    ("📚 Ta'lim", "education"),
-    ("🎬 Ko'ngilochar", "fun"),
-    ("📌 Boshqa", "other"),
-]
-
-CATS_INCOME = [
-    ("💼 Ish haqi", "salary"),
-    ("🧾 Bonus", "bonus"),
-    ("🎁 Sovg'a", "gift"),
-    ("📌 Boshqa", "other"),
-]
-
-# Conversation states
-CHOOSE_TYPE, CHOOSE_CAT, ENTER_AMOUNT, ENTER_DESC = range(4)
-
-# -----------------------------
-# Keyboards
-# -----------------------------
-def main_kb():
-    rows = []
-
-    if WEBAPP_URL:
-        rows.append([KeyboardButton(BTN_APP, web_app=WebAppInfo(url=WEBAPP_URL))])
-
-    rows += [
-        [KeyboardButton(BTN_EXPENSE), KeyboardButton(BTN_INCOME)],
-        [KeyboardButton(BTN_REPORTS), KeyboardButton(BTN_DEBT)],
-        [KeyboardButton(BTN_SETTINGS)],
-    ]
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
-
-def cancel_kb():
-    return ReplyKeyboardMarkup([[KeyboardButton(BTN_CANCEL)]], resize_keyboard=True)
-
-def categories_kb(cat_list):
-    rows = []
-    row = []
-    for label, _key in cat_list:
-        row.append(KeyboardButton(label))
-        if len(row) == 2:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
-    rows.append([KeyboardButton(BTN_CANCEL)])
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
-
-def reports_kb():
+def main_menu(lang: str):
+    # Simple “startup-like” menu (reply keyboard)
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton(BTN_TODAY), KeyboardButton(BTN_7)],
-            [KeyboardButton(BTN_30), KeyboardButton(BTN_CSV)],
-            [KeyboardButton(BTN_CANCEL)],
+            [KeyboardButton("➖ Xarajat"), KeyboardButton("➕ Daromad")],
+            [KeyboardButton("🧾 Chek"), KeyboardButton("🎯 Maqsad")],
+            [KeyboardButton("📊 Hisobot"), KeyboardButton("⚙️ Sozlama")],
         ],
-        resize_keyboard=True,
+        resize_keyboard=True
     )
 
-# -----------------------------
-# API helpers
-# -----------------------------
-async def api_post(path: str, payload: dict):
+def settings_menu(lang: str):
+    row = [KeyboardButton("🌐 Til"), KeyboardButton("💰 Limit")]
+    row2 = [KeyboardButton("⬅️ Orqaga")]
+    return ReplyKeyboardMarkup([row, row2], resize_keyboard=True)
+
+def lang_menu():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🇺🇿 Uzbek", callback_data="lang:uz"),
+         InlineKeyboardButton("🇷🇺 Русский", callback_data="lang:ru"),
+         InlineKeyboardButton("🇬🇧 English", callback_data="lang:en")]
+    ])
+
+def draft_kb(draft_id: str):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Saqlash", callback_data=f"draft:save:{draft_id}"),
+         InlineKeyboardButton("✏️ Edit", callback_data=f"draft:edit:{draft_id}")],
+        [InlineKeyboardButton("❌ Bekor", callback_data=f"draft:cancel:{draft_id}")]
+    ])
+
+def edit_kb(draft_id: str):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔁 Type", callback_data=f"edit:type:{draft_id}"),
+         InlineKeyboardButton("🏷 Category", callback_data=f"edit:cat:{draft_id}")],
+        [InlineKeyboardButton("💵 Amount", callback_data=f"edit:amount:{draft_id}"),
+         InlineKeyboardButton("📝 Desc", callback_data=f"edit:desc:{draft_id}")],
+        [InlineKeyboardButton("✅ Save", callback_data=f"draft:save:{draft_id}"),
+         InlineKeyboardButton("❌ Cancel", callback_data=f"draft:cancel:{draft_id}")]
+    ])
+
+CATEGORIES = [
+    ("food","🍕 Oziq-ovqat"),
+    ("transport","🚕 Transport"),
+    ("rent","🏠 Ijara"),
+    ("bills","📶 Kommunal"),
+    ("health","💊 Dori"),
+    ("shopping","🛍 Xarid"),
+    ("misc","📦 Boshqa"),
+]
+
+def cat_kb(prefix: str, draft_id: str):
+    buttons = []
+    for k, label in CATEGORIES:
+        buttons.append([InlineKeyboardButton(label, callback_data=f"{prefix}:{draft_id}:{k}")])
+    buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=f"edit:back:{draft_id}")])
+    return InlineKeyboardMarkup(buttons)
+
+async def api_post(path: str, json: dict):
     headers = {"X-API-SECRET": API_SECRET} if API_SECRET else {}
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.post(f"{API_URL}{path}", json=payload, headers=headers)
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.post(f"{API_URL}{path}", json=json, headers=headers)
         r.raise_for_status()
         return r.json()
 
-async def api_get_json(path: str, params: dict):
+async def api_get(path: str, params: dict):
     headers = {"X-API-SECRET": API_SECRET} if API_SECRET else {}
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=60) as client:
         r = await client.get(f"{API_URL}{path}", params=params, headers=headers)
+        r.raise_for_status()
+        return r
+
+async def api_file(path: str, file_bytes: bytes, filename: str):
+    headers = {"X-API-SECRET": API_SECRET} if API_SECRET else {}
+    files = {"file": (filename, file_bytes)}
+    async with httpx.AsyncClient(timeout=120) as client:
+        r = await client.post(f"{API_URL}{path}", files=files, headers=headers)
         r.raise_for_status()
         return r.json()
 
-async def api_get_bytes(path: str, params: dict) -> bytes:
-    headers = {"X-API-SECRET": API_SECRET} if API_SECRET else {}
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.get(f"{API_URL}{path}", params=params, headers=headers)
-        r.raise_for_status()
-        return r.content
+def get_lang(context: ContextTypes.DEFAULT_TYPE) -> str:
+    return context.user_data.get("lang", "uz")
 
-# -----------------------------
-# Utilities
-# -----------------------------
-def find_cat_key_by_label(label: str, cat_list):
-    for l, k in cat_list:
-        if l == label:
-            return k
-    return None
+def set_lang(context: ContextTypes.DEFAULT_TYPE, lang: str):
+    context.user_data["lang"] = lang
 
-def parse_amount(text: str) -> int | None:
-    # allow: "90 000", "90000", "90k" not included, keep simple
-    digits = re.sub(r"[^\d]", "", text or "")
-    if not digits:
-        return None
-    try:
-        return int(digits)
-    except Exception:
-        return None
+def draft_render(d: dict) -> str:
+    # human-readable preview
+    lines = []
+    lines.append(f"Type: {d['type']}")
+    lines.append(f"Category: {d['category_key']}")
+    lines.append(f"Amount: {d['amount']} UZS")
+    if d.get("merchant"):
+        lines.append(f"Merchant: {d['merchant']}")
+    if d.get("description"):
+        lines.append(f"Desc: {d['description']}")
+    if d.get("raw_text"):
+        lines.append(f"Raw: {d['raw_text']}")
+    return "\n".join(lines)
 
-# -----------------------------
-# Start / Menu
-# -----------------------------
+def new_draft(context, draft: dict) -> str:
+    import uuid
+    did = str(uuid.uuid4())[:8]
+    drafts = context.user_data.setdefault("drafts", {})
+    drafts[did] = draft
+    return did
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
     await update.message.reply_text(
-        "✅ Hamyon bot ishlayapti.\n\n"
-        "Tez yozish ham mumkin:\n"
-        "— `food 97500 lunch`\n"
-        "— `transport 12000 taxi`\n\n"
-        "Pastdagi tugmalar orqali foydalaning 👇",
-        reply_markup=main_kb(),
+        t(lang, "welcome"),
         parse_mode="Markdown",
+        reply_markup=main_menu(lang)
+    )
+    # first time: show language switch
+    await update.message.reply_text(t(lang, "choose_lang"), reply_markup=lang_menu())
+
+async def on_lang_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    data = q.data
+    if data.startswith("lang:"):
+        lang = data.split(":")[1]
+        set_lang(context, lang)
+        await q.edit_message_text("✅ OK")
+        # refresh welcome/menu
+        await q.message.reply_text(t(lang,"welcome"), parse_mode="Markdown", reply_markup=main_menu(lang))
+
+# -------- Stats / CSV ----------
+async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE, days: int):
+    lang = get_lang(context)
+    tg_id = update.effective_user.id
+    if days == 1:
+        r = await api_get("/stats/today", {"telegram_id": tg_id})
+        d = r.json()
+        text = f"{t(lang,'stats_today')}\nXarajat: {d['expense']} UZS\nDaromad: {d['income']} UZS\nQarz: {d['debt']} UZS\nTranzaksiya: {d['count']}"
+    else:
+        r = await api_get("/stats/range", {"telegram_id": tg_id, "days": days})
+        d = r.json()
+        title = t(lang,'stats_week') if days==7 else t(lang,'stats_month')
+        text = f"{title}\nXarajat: {d['expense']} UZS\nDaromad: {d['income']} UZS\nQarz: {d['debt']} UZS"
+    await update.message.reply_text(text, reply_markup=main_menu(lang))
+
+async def csv_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
+    tg_id = update.effective_user.id
+    r = await api_get("/export/csv", {"telegram_id": tg_id})
+    await update.message.reply_document(
+        document=r.text.encode("utf-8"),
+        filename="transactions.csv",
+        caption=t(lang,"csv")
     )
 
-# -----------------------------
-# Conversation: Add transaction
-# -----------------------------
-async def add_expense_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["tx_type"] = "expense"
-    await update.message.reply_text("Xarajat kategoriyasini tanlang:", reply_markup=categories_kb(CATS_EXPENSE))
-    return CHOOSE_CAT
-
-async def add_income_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["tx_type"] = "income"
-    await update.message.reply_text("Daromad turini tanlang:", reply_markup=categories_kb(CATS_INCOME))
-    return CHOOSE_CAT
-
-async def choose_cat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# -------- Menu flows ----------
+async def on_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
     txt = (update.message.text or "").strip()
-    if txt == BTN_CANCEL:
-        await update.message.reply_text("Bekor qilindi ✅", reply_markup=main_kb())
-        return ConversationHandler.END
 
-    tx_type = context.user_data.get("tx_type", "expense")
-    cat_list = CATS_EXPENSE if tx_type == "expense" else CATS_INCOME
-    cat_key = find_cat_key_by_label(txt, cat_list)
-    if not cat_key:
-        await update.message.reply_text("Iltimos, tugmalardan birini tanlang 👇", reply_markup=categories_kb(cat_list))
-        return CHOOSE_CAT
-
-    context.user_data["category_key"] = cat_key
-    await update.message.reply_text("Summani kiriting (masalan: 90000):", reply_markup=cancel_kb())
-    return ENTER_AMOUNT
-
-async def enter_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    txt = (update.message.text or "").strip()
-    if txt == BTN_CANCEL:
-        await update.message.reply_text("Bekor qilindi ✅", reply_markup=main_kb())
-        return ConversationHandler.END
-
-    amount = parse_amount(txt)
-    if amount is None or amount <= 0:
-        await update.message.reply_text("Summa noto‘g‘ri. Masalan: 90000", reply_markup=cancel_kb())
-        return ENTER_AMOUNT
-
-    context.user_data["amount"] = amount
-    await update.message.reply_text("Izoh (ixtiyoriy). Yozing yoki '0' deb yuboring:", reply_markup=cancel_kb())
-    return ENTER_DESC
-
-async def enter_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    txt = (update.message.text or "").strip()
-    if txt == BTN_CANCEL:
-        await update.message.reply_text("Bekor qilindi ✅", reply_markup=main_kb())
-        return ConversationHandler.END
-
-    desc = None if txt in ("0", "-", "yo‘q", "yoq", "нет", "no") else txt
-
-    tg_id = update.effective_user.id
-    payload = {
-        "telegram_id": tg_id,                         # keep required ✅
-        "type": context.user_data.get("tx_type", "expense"),
-        "amount": context.user_data["amount"],
-        "category_key": context.user_data["category_key"],
-        "description": desc,
-        "source": "menu",
-    }
-
-    await api_post("/transactions", payload)
-    await update.message.reply_text("✅ Saqlandi!", reply_markup=main_kb())
-    return ConversationHandler.END
-
-async def cancel_any(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Bekor qilindi ✅", reply_markup=main_kb())
-    return ConversationHandler.END
-
-# -----------------------------
-# Reports flow
-# -----------------------------
-async def reports_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Qaysi hisobot kerak?", reply_markup=reports_kb())
-    return CHOOSE_TYPE
-
-async def reports_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    txt = (update.message.text or "").strip()
-    if txt == BTN_CANCEL:
-        await update.message.reply_text("✅", reply_markup=main_kb())
-        return ConversationHandler.END
-
-    tg_id = update.effective_user.id
-
-    if txt == BTN_TODAY:
-        d = await api_get_json("/stats/today", {"telegram_id": tg_id})
-        msg = (
-            f"📊 Bugun:\n"
-            f"➖ Xarajat: {d['expense']} UZS\n"
-            f"➕ Daromad: {d['income']} UZS\n"
-            f"📄 Qarz: {d['debt']} UZS\n"
-            f"🔢 Tranzaksiya: {d['count']}"
-        )
-        await update.message.reply_text(msg, reply_markup=reports_kb())
-        return CHOOSE_TYPE
-
-    if txt in (BTN_7, BTN_30):
-        days = 7 if txt == BTN_7 else 30
-        d = await api_get_json("/stats/range", {"telegram_id": tg_id, "days": days})
-        msg = (
-            f"📆 {days} kun:\n"
-            f"➖ Xarajat: {d['expense']} UZS\n"
-            f"➕ Daromad: {d['income']} UZS\n"
-            f"📄 Qarz: {d['debt']} UZS"
-        )
-        await update.message.reply_text(msg, reply_markup=reports_kb())
-        return CHOOSE_TYPE
-
-    if txt == BTN_CSV:
-        content = await api_get_bytes("/export/csv", {"telegram_id": tg_id})
-        await update.message.reply_document(
-            document=content,
-            filename="transactions.csv",
-            caption="⬇️ CSV export",
-        )
-        await update.message.reply_text("Yana hisobot?", reply_markup=reports_kb())
-        return CHOOSE_TYPE
-
-    await update.message.reply_text("Iltimos, tugmalardan tanlang 👇", reply_markup=reports_kb())
-    return CHOOSE_TYPE
-
-# -----------------------------
-# Free text quick add (NLP)
-# Works when user types: "food 97500 lunch"
-# -----------------------------
-async def on_text_quick_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (update.message.text or "").strip()
-    if text in (BTN_EXPENSE, BTN_INCOME, BTN_REPORTS, BTN_DEBT, BTN_SETTINGS, BTN_APP, BTN_CANCEL):
+    if txt == "📊 Hisobot":
+        await show_stats(update, context, 1)
+        await show_stats(update, context, 7)
         return
 
-    parsed = parse_quick_add(text)
-    if not parsed:
+    if txt == "⚙️ Sozlama":
+        await update.message.reply_text(t(lang,"settings"), reply_markup=settings_menu(lang))
         return
 
-    cat, amount, desc = parsed
-    tg_id = update.effective_user.id
+    if txt == "🌐 Til":
+        await update.message.reply_text(t(lang,"choose_lang"), reply_markup=lang_menu())
+        return
 
-    await api_post("/transactions", {
-        "telegram_id": tg_id,
-        "type": "expense",
-        "amount": amount,
-        "category_key": cat,
-        "description": desc,
-        "source": "text",
-    })
-    await update.message.reply_text("✅ Saqlandi!", reply_markup=main_kb())
+    if txt == "💰 Limit":
+        context.user_data["await_budget"] = True
+        await update.message.reply_text("Limit format:\n`food 1500000`\n`transport 500000`\nYoki umumiy: `all 3000000`", parse_mode="Markdown")
+        return
 
-# -----------------------------
-# Voice -> text (optional)
-# -----------------------------
-async def transcribe_voice(file_bytes: bytes) -> str | None:
-    if not OPENAI_API_KEY:
-        return None
-    try:
-        from openai import OpenAI
-        client = OpenAI(api_key=OPENAI_API_KEY)
-        resp = client.audio.transcriptions.create(
-            model="gpt-4o-mini-transcribe",
-            file=("voice.ogg", file_bytes),
-        )
-        return resp.text
-    except Exception:
-        return None
+    if txt == "⬅️ Orqaga":
+        await update.message.reply_text("✅", reply_markup=main_menu(lang))
+        return
 
+    # If user types quick add like: "taksi 20000"
+    parsed = parse_single_line(txt)
+    if parsed:
+        cat, amount, desc = parsed
+        draft = {
+            "type": "expense",
+            "category_key": cat,
+            "amount": amount,
+            "description": desc,
+            "source": "text",
+            "raw_text": txt
+        }
+        did = new_draft(context, draft)
+        await update.message.reply_text(t(lang,"draft_title") + "\n\n" + draft_render(draft), reply_markup=draft_kb(did))
+        return
+
+    # budget input waiting
+    if context.user_data.get("await_budget"):
+        context.user_data["await_budget"] = False
+        m = re.match(r"^\s*(\w+)\s+(\d[\d\s]*)\s*$", txt.lower())
+        if not m:
+            await update.message.reply_text("❌ Format: `food 1500000`", parse_mode="Markdown")
+            return
+        cat = m.group(1)
+        amount = int(re.sub(r"[^\d]","",m.group(2)))
+        if cat == "all":
+            cat = None
+
+        tg_id = update.effective_user.id
+        await api_post("/budgets", {"telegram_id": tg_id, "category_key": cat, "monthly_limit": amount, "enabled": True})
+        await update.message.reply_text(t(lang,"budget_set"), reply_markup=main_menu(lang))
+        return
+
+# -------- Voice: auto parse, no button ----------
 async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    voice = update.message.voice
-    if not voice:
-        return
+    lang = get_lang(context)
+    tg_id = update.effective_user.id
 
+    voice = update.message.voice
     f = await context.bot.get_file(voice.file_id)
     b = await f.download_as_bytearray()
 
-    text = await transcribe_voice(bytes(b))
-    if not text:
-        await update.message.reply_text("🎙 Ovozni o‘qish uchun OPENAI_API_KEY kerak.", reply_markup=main_kb())
+    # Parse via API
+    data = await api_file("/parse/voice", bytes(b), "voice.ogg")
+    text = data.get("text","")
+    items = data.get("items", [])
+
+    if not items:
+        await update.message.reply_text(f"🎙 Matn: {text}\n\n❌ Tushunmadim. Misol: `taksi 20000`", parse_mode="Markdown")
         return
 
-    parsed = parse_quick_add(text)
-    if not parsed:
-        await update.message.reply_text(f"🎙 Matn: {text}\n\n❌ Tushunmadim. Misol: 'food 97500'", reply_markup=main_kb())
-        return
-
-    cat, amount, desc = parsed
-    tg_id = update.effective_user.id
-
-    await api_post("/transactions", {
-        "telegram_id": tg_id,
+    # if multi-items: create one draft per item, or one combined draft?
+    # We'll create combined draft as one expense with desc listing items (simple & safe)
+    total = sum(int(x["amount"]) for x in items)
+    desc_lines = []
+    for it in items:
+        desc_lines.append(f"{it['category_key']} {it['amount']}" + (f" {it.get('description')}" if it.get("description") else ""))
+    draft = {
         "type": "expense",
-        "amount": amount,
-        "category_key": cat,
-        "description": desc or f"(voice) {text}",
+        "category_key": "misc",
+        "amount": total,
+        "description": " | ".join(desc_lines),
         "source": "voice",
-    })
-    await update.message.reply_text(f"🎙 {text}\n✅ Saqlandi!", reply_markup=main_kb())
+        "raw_text": text
+    }
+    did = new_draft(context, draft)
+    await update.message.reply_text(t(lang,"draft_title") + "\n\n" + draft_render(draft), reply_markup=draft_kb(did))
 
-# -----------------------------
-# Router for menu buttons
-# -----------------------------
-async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# -------- Receipt photo: auto parse ----------
+async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang(context)
+    photos = update.message.photo
+    if not photos:
+        return
+    best = photos[-1]
+    f = await context.bot.get_file(best.file_id)
+    b = await f.download_as_bytearray()
+
+    data = await api_file("/parse/receipt", bytes(b), "receipt.jpg")
+    rec = data.get("data", {})
+    suggested = data.get("suggested_category","misc")
+
+    merchant = rec.get("merchant")
+    total = rec.get("total")
+    if not total:
+        await update.message.reply_text("🧾 Chek o‘qildi, lekin total topilmadi. Summani yozing: `ovqat 97500`", parse_mode="Markdown")
+        return
+
+    draft = {
+        "type": "expense",
+        "category_key": suggested,
+        "amount": int(float(total)),
+        "description": "receipt",
+        "merchant": merchant,
+        "source": "receipt",
+        "raw_text": None
+    }
+    did = new_draft(context, draft)
+    await update.message.reply_text(t(lang,"draft_title") + "\n\n" + draft_render(draft), reply_markup=draft_kb(did))
+
+# -------- Draft callbacks (save/edit/cancel) ----------
+async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    lang = get_lang(context)
+    data = q.data or ""
+    drafts = context.user_data.setdefault("drafts", {})
+
+    if data.startswith("draft:cancel:"):
+        did = data.split(":")[2]
+        drafts.pop(did, None)
+        await q.edit_message_text(t(lang,"cancelled"))
+        return
+
+    if data.startswith("draft:edit:"):
+        did = data.split(":")[2]
+        d = drafts.get(did)
+        if not d:
+            await q.edit_message_text("❌ Draft not found")
+            return
+        await q.edit_message_text(t(lang,"edit_what") + "\n\n" + draft_render(d), reply_markup=edit_kb(did))
+        return
+
+    if data.startswith("edit:back:"):
+        did = data.split(":")[2]
+        d = drafts.get(did)
+        await q.edit_message_text(t(lang,"edit_what") + "\n\n" + draft_render(d), reply_markup=edit_kb(did))
+        return
+
+    if data.startswith("edit:cat:"):
+        did = data.split(":")[2]
+        await q.edit_message_text("🏷 Category tanlang:", reply_markup=cat_kb("pickcat", did))
+        return
+
+    if data.startswith("pickcat:"):
+        _, did, cat = data.split(":")
+        d = drafts.get(did)
+        if not d:
+            await q.edit_message_text("❌ Draft not found")
+            return
+        d["category_key"] = cat
+        await q.edit_message_text(t(lang,"edit_what") + "\n\n" + draft_render(d), reply_markup=edit_kb(did))
+        return
+
+    if data.startswith("edit:type:"):
+        did = data.split(":")[2]
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("➖ expense", callback_data=f"picktype:{did}:expense"),
+             InlineKeyboardButton("➕ income", callback_data=f"picktype:{did}:income")],
+            [InlineKeyboardButton("📄 debt", callback_data=f"picktype:{did}:debt")],
+            [InlineKeyboardButton("⬅️ Back", callback_data=f"edit:back:{did}")]
+        ])
+        await q.edit_message_text("Type:", reply_markup=kb)
+        return
+
+    if data.startswith("picktype:"):
+        _, did, tp = data.split(":")
+        d = drafts.get(did)
+        d["type"] = tp
+        await q.edit_message_text(t(lang,"edit_what") + "\n\n" + draft_render(d), reply_markup=edit_kb(did))
+        return
+
+    if data.startswith("edit:amount:"):
+        did = data.split(":")[2]
+        context.user_data["await_amount_for"] = did
+        await q.message.reply_text(t(lang,"ask_amount"))
+        return
+
+    if data.startswith("edit:desc:"):
+        did = data.split(":")[2]
+        context.user_data["await_desc_for"] = did
+        await q.message.reply_text(t(lang,"ask_desc"), parse_mode="Markdown")
+        return
+
+    if data.startswith("draft:save:"):
+        did = data.split(":")[2]
+        d = drafts.get(did)
+        if not d:
+            await q.edit_message_text("❌ Draft not found")
+            return
+        tg_id = q.from_user.id
+        payload = {
+            "telegram_id": tg_id,
+            "type": d["type"],
+            "amount": d["amount"],
+            "category_key": d["category_key"],
+            "description": d.get("description"),
+            "merchant": d.get("merchant"),
+            "source": d.get("source","manual"),
+            "raw_text": d.get("raw_text")
+        }
+        res = await api_post("/transactions", payload)
+        drafts.pop(did, None)
+
+        await q.edit_message_text(t(lang,"saved"))
+        # budget alert
+        if res.get("budget_exceeded"):
+            limit_val = res.get("limit")
+            spent = res.get("spent")
+            cat = d["category_key"]
+            await q.message.reply_text(t(lang,"budget_over").format(cat=cat, limit=limit_val, spent=spent))
+        return
+
+# -------- capture replies for amount/desc edit ----------
+async def on_text_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (update.message.text or "").strip()
+    lang = get_lang(context)
+    drafts = context.user_data.setdefault("drafts", {})
 
-    if txt == BTN_EXPENSE:
-        return await add_expense_entry(update, context)
-    if txt == BTN_INCOME:
-        return await add_income_entry(update, context)
-    if txt == BTN_REPORTS:
-        return await reports_entry(update, context)
+    did = context.user_data.get("await_amount_for")
+    if did:
+        context.user_data["await_amount_for"] = None
+        d = drafts.get(did)
+        if not d:
+            return
+        try:
+            amount = int(re.sub(r"[^\d]","",txt))
+            d["amount"] = amount
+            await update.message.reply_text("✅ Amount updated.")
+        except:
+            await update.message.reply_text("❌ Raqam yuboring.")
+        return
 
-    if txt == BTN_SETTINGS:
-        await update.message.reply_text("⚙️ Sozlama (keyin qo‘shamiz).", reply_markup=main_kb())
-        return ConversationHandler.END
+    did = context.user_data.get("await_desc_for")
+    if did:
+        context.user_data["await_desc_for"] = None
+        d = drafts.get(did)
+        if not d:
+            return
+        d["description"] = None if txt == "-" else txt
+        await update.message.reply_text("✅ Desc updated.")
+        return
 
-    if txt == BTN_DEBT:
-        await update.message.reply_text("📄 Qarz (keyin qo‘shamiz).", reply_markup=main_kb())
-        return ConversationHandler.END
+async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await show_stats(update, context, 1)
 
-    if txt == BTN_CANCEL:
-        await update.message.reply_text("✅", reply_markup=main_kb())
-        return ConversationHandler.END
+async def cmd_week(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await show_stats(update, context, 7)
 
-    # if not a menu button, try quick add
-    await on_text_quick_add(update, context)
-    return ConversationHandler.END
+async def cmd_month(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await show_stats(update, context, 30)
 
-# -----------------------------
-# App bootstrap
-# -----------------------------
-def build_app() -> Application:
+async def cmd_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await csv_cmd(update, context)
+
+def build_app():
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("today", cmd_today))
+    app.add_handler(CommandHandler("week", cmd_week))
+    app.add_handler(CommandHandler("month", cmd_month))
+    app.add_handler(CommandHandler("csv", cmd_csv))
 
-    # Add/Report are handled via one conversation for “menu feeling”
-    conv = ConversationHandler(
-        entry_points=[
-            MessageHandler(filters.TEXT & ~filters.COMMAND, menu_router),
-        ],
-        states={
-            CHOOSE_CAT: [MessageHandler(filters.TEXT & ~filters.COMMAND, choose_cat)],
-            ENTER_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, enter_amount)],
-            ENTER_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, enter_desc)],
+    app.add_handler(CallbackQueryHandler(on_lang_cb, pattern=r"^lang:"))
+    app.add_handler(CallbackQueryHandler(on_callback))
 
-            # reuse CHOOSE_TYPE for reports menu selection
-            CHOOSE_TYPE: [MessageHandler(filters.TEXT & ~filters.COMMAND, reports_choice)],
-        },
-        fallbacks=[MessageHandler(filters.Regex(f"^{re.escape(BTN_CANCEL)}$"), cancel_any)],
-        allow_reentry=True,
-    )
-    app.add_handler(conv)
-
+    # Priority: voice/photo first
     app.add_handler(MessageHandler(filters.VOICE, on_voice))
+    app.add_handler(MessageHandler(filters.PHOTO, on_photo))
+
+    # Menu / quick-add / settings
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_menu_text))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text_edit))
 
     return app
 
 if __name__ == "__main__":
+    # IMPORTANT: DO NOT wrap run_polling inside asyncio.run
+    # This fixes your “event loop already running” error.
     application = build_app()
-    # IMPORTANT: no asyncio.run, no await here ✅
     application.run_polling(drop_pending_updates=True)
