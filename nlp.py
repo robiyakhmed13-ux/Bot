@@ -1,44 +1,40 @@
+# nlp.py
 import re
+from typing import Optional, Tuple
 
-CATEGORY_ALIASES = {
-    "food": ["food", "ovqat", "oziq", "oziq-ovqat", "еда"],
-    "transport": ["transport", "taxi", "taksi", "metro", "bus", "авто"],
-    "rent": ["rent", "ijara", "аренда"],
-    "salary": ["salary", "oylik", "зарплата"],
-}
-
-def normalize_amount(text: str) -> int | None:
-    # accepts "97 500", "97500", "97,500"
-    digits = re.sub(r"[^\d]", "", text)
-    if not digits:
+# Accepts:
+# "food 97500"
+# "transport 12000 taxi"
+# "coffee 25k"
+# "food 97_500 lunch"
+def parse_quick_add(text: str) -> Optional[Tuple[str, int, str | None]]:
+    if not text:
         return None
-    return int(digits)
 
-def guess_category(text: str) -> str:
-    t = text.lower().strip()
-    for key, aliases in CATEGORY_ALIASES.items():
-        if any(a in t for a in aliases):
-            return key
-    return "food"  # default
-
-def parse_quick_add(text: str):
-    """
-    Examples:
-      "food 97500"
-      "ovqat 97 500"
-      "transport 12000 taxi"
-      "97500 food"
-    Returns: (category_key, amount, description)
-    """
     t = text.strip()
-    amt = normalize_amount(t)
-    cat = guess_category(t)
-
-    # Remove amount from description
-    desc = re.sub(r"[\d\s,]+", " ", t).strip()
-    if not desc:
-        desc = None
-
-    if amt is None:
+    # category = first word, amount = second token
+    parts = t.split()
+    if len(parts) < 2:
         return None
-    return cat, amt, desc
+
+    cat = parts[0].strip().lower()
+
+    amt_raw = parts[1].strip().lower().replace("_", "").replace(",", "")
+    amt_raw = amt_raw.replace(" ", "")
+
+    m = re.match(r"^(\d+(?:\.\d+)?)(k)?$", amt_raw)
+    if not m:
+        # fallback: digits only
+        digits = "".join(ch for ch in amt_raw if ch.isdigit())
+        if not digits:
+            return None
+        amount = int(digits)
+    else:
+        num = float(m.group(1))
+        if m.group(2) == "k":
+            num *= 1000
+        amount = int(num)
+
+    desc = " ".join(parts[2:]).strip() if len(parts) > 2 else None
+    desc = desc if desc else None
+    return cat, amount, desc
