@@ -545,20 +545,17 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(TOKEN).build()
 
-    # Commands
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("settings", settings))
-    app.add_handler(CommandHandler("stats", stats_cmd))
+    app.add_handler(CommandHandler("add", add_cmd))
+    app.add_handler(CommandHandler("today", today))
+    app.add_handler(CommandHandler("range", range_cmd))
+    app.add_handler(CommandHandler("csv", csv_cmd))
 
-    # ✅ IMPORTANT: callback handler order + patterns (fix your “Save/Edit not responding”)
-    app.add_handler(CallbackQueryHandler(on_lang_cb, pattern=r"^lang:"))
-    app.add_handler(CallbackQueryHandler(on_callback, pattern=r"^(stats:|csv$|draft:|edit:|pickcat:|picktype:)"))
-
-    # Messages
+    app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.VOICE, on_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
-    # ✅ IMPORTANT: no asyncio.run here (fix event loop crash on Railway)
+    # IMPORTANT: run_polling is NOT awaited
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
