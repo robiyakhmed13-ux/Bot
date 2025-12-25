@@ -1,40 +1,32 @@
-# nlp.py
 import re
-from typing import Optional, Tuple
 
-# Accepts:
-# "food 97500"
-# "transport 12000 taxi"
-# "coffee 25k"
-# "food 97_500 lunch"
-def parse_quick_add(text: str) -> Optional[Tuple[str, int, str | None]]:
+ALLOWED = {
+    "food", "transport", "home", "bills", "health", "shopping", "gift", "education", "fun", "other",
+    "salary", "bonus",
+}
+
+def parse_quick_add(text: str):
+    """
+    Examples:
+      "food 97500"
+      "transport 12000 taxi"
+    Returns: (category_key, amount, desc) or None
+    """
     if not text:
         return None
 
-    t = text.strip()
-    # category = first word, amount = second token
-    parts = t.split()
+    parts = text.strip().split()
     if len(parts) < 2:
         return None
 
-    cat = parts[0].strip().lower()
+    cat = parts[0].lower()
+    if cat not in ALLOWED:
+        return None
 
-    amt_raw = parts[1].strip().lower().replace("_", "").replace(",", "")
-    amt_raw = amt_raw.replace(" ", "")
+    amount_str = re.sub(r"[^\d]", "", parts[1])
+    if not amount_str:
+        return None
 
-    m = re.match(r"^(\d+(?:\.\d+)?)(k)?$", amt_raw)
-    if not m:
-        # fallback: digits only
-        digits = "".join(ch for ch in amt_raw if ch.isdigit())
-        if not digits:
-            return None
-        amount = int(digits)
-    else:
-        num = float(m.group(1))
-        if m.group(2) == "k":
-            num *= 1000
-        amount = int(num)
-
+    amount = int(amount_str)
     desc = " ".join(parts[2:]).strip() if len(parts) > 2 else None
-    desc = desc if desc else None
-    return cat, amount, desc
+    return (cat, amount, desc)
