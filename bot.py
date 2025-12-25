@@ -484,14 +484,35 @@ USER_STATE: Dict[int, str] = {}
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def api_post(path: str, json_body: dict) -> dict:
-    headers = {"X-API-SECRET": API_SECRET} if API_SECRET else {}
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.post(f"{API_URL}{path}", json=json_body, headers=headers)
-        r.raise_for_status()
-        return r.json()
+    headers = {}
+    if API_SECRET:
+        headers["X-API-KEY"] = API_SECRET
+        headers["X-API-SECRET"] = API_SECRET  # Support both headers
+    
+    url = f"{API_URL}{path}"
+    print(f"📤 API POST: {url}")
+    print(f"📦 Body: {json_body}")
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.post(url, json=json_body, headers=headers)
+            print(f"📥 Response: {r.status_code}")
+            if r.status_code != 200:
+                print(f"❌ Error body: {r.text}")
+            r.raise_for_status()
+            return r.json()
+    except httpx.ConnectError as e:
+        print(f"❌ Connection error: {e}")
+        raise
+    except Exception as e:
+        print(f"❌ API error: {e}")
+        raise
 
 async def api_get(path: str, params: dict) -> Tuple[dict, httpx.Response]:
-    headers = {"X-API-SECRET": API_SECRET} if API_SECRET else {}
+    headers = {}
+    if API_SECRET:
+        headers["X-API-KEY"] = API_SECRET
+        headers["X-API-SECRET"] = API_SECRET  # Support both headers
+    
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.get(f"{API_URL}{path}", params=params, headers=headers)
         r.raise_for_status()
@@ -967,8 +988,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
     
     except Exception as e:
-        print(f"Callback error: {e}")
-        await query.message.reply_text(t(lang, "error"))
+        error_msg = str(e)
+        print(f"❌ Callback error: {error_msg}")
+        
+        # Show more helpful error to user
+        if "ConnectError" in error_msg or "Connection" in error_msg:
+            await query.message.reply_text("⚠️ API serverga ulanib bo'lmadi. Keyinroq urinib ko'ring.")
+        elif "401" in error_msg or "403" in error_msg:
+            await query.message.reply_text("⚠️ API autentifikatsiya xatosi.")
+        else:
+            await query.message.reply_text(f"⚠️ {t(lang, 'error')}: {error_msg[:100]}")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle text messages"""
