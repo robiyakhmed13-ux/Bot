@@ -1,12 +1,18 @@
 import os
 import re
 import httpx
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardRemove,
+    WebAppInfo,
+)
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
-    CallbackQueryHandler,
+    ConversationHandler,
     ContextTypes,
     filters,
 )
@@ -14,203 +20,294 @@ from telegram.ext import (
 from nlp import parse_quick_add
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-API_URL = os.getenv("API_URL")          # e.g. https://your-api.up.railway.app
-API_SECRET = os.getenv("API_SECRET", "")  # optional shared secret with API
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")  # optional voice
+API_URL = (os.getenv("API_URL") or "").rstrip("/")          # e.g. https://your-api.up.railway.app
+API_SECRET = os.getenv("API_SECRET", "")
+WEBAPP_URL = os.getenv("WEBAPP_URL", "")                    # your mini app URL
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")           # optional
 
 if not TOKEN:
     raise ValueError("Missing TELEGRAM_BOT_TOKEN")
 if not API_URL:
     raise ValueError("Missing API_URL")
 
+# -----------------------------
+# Menu labels (Uzbek)
+# -----------------------------
+BTN_APP = "📱 Ilova"
+BTN_EXPENSE = "➖ Xarajat"
+BTN_INCOME = "➕ Daromad"
+BTN_DEBT = "📄 Qarz"
+BTN_REPORTS = "📊 Hisobot"
+BTN_SETTINGS = "⚙️ Sozlama"
+BTN_CANCEL = "❌ Bekor qilish"
 
-# ---------------------------
-# UI
-# ---------------------------
-def kb_main():
-    return InlineKeyboardMarkup([
+BTN_TODAY = "📅 Bugun"
+BTN_7 = "🗓 7 kun"
+BTN_30 = "🗓 30 kun"
+BTN_CSV = "⬇️ CSV"
+
+# Categories (label -> key)
+CATS_EXPENSE = [
+    ("🍕 Oziq-ovqat", "food"),
+    ("🚕 Transport", "transport"),
+    ("🏠 Uy", "home"),
+    ("🧾 Kommunal", "bills"),
+    ("💊 Dori", "health"),
+    ("🛍 Xarid", "shopping"),
+    ("🎁 Sovg'a", "gift"),
+    ("📚 Ta'lim", "education"),
+    ("🎬 Ko'ngilochar", "fun"),
+    ("📌 Boshqa", "other"),
+]
+
+CATS_INCOME = [
+    ("💼 Ish haqi", "salary"),
+    ("🧾 Bonus", "bonus"),
+    ("🎁 Sovg'a", "gift"),
+    ("📌 Boshqa", "other"),
+]
+
+# Conversation states
+CHOOSE_TYPE, CHOOSE_CAT, ENTER_AMOUNT, ENTER_DESC = range(4)
+
+# -----------------------------
+# Keyboards
+# -----------------------------
+def main_kb():
+    rows = []
+
+    if WEBAPP_URL:
+        rows.append([KeyboardButton(BTN_APP, web_app=WebAppInfo(url=WEBAPP_URL))])
+
+    rows += [
+        [KeyboardButton(BTN_EXPENSE), KeyboardButton(BTN_INCOME)],
+        [KeyboardButton(BTN_REPORTS), KeyboardButton(BTN_DEBT)],
+        [KeyboardButton(BTN_SETTINGS)],
+    ]
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
+
+def cancel_kb():
+    return ReplyKeyboardMarkup([[KeyboardButton(BTN_CANCEL)]], resize_keyboard=True)
+
+def categories_kb(cat_list):
+    rows = []
+    row = []
+    for label, _key in cat_list:
+        row.append(KeyboardButton(label))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([KeyboardButton(BTN_CANCEL)])
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
+
+def reports_kb():
+    return ReplyKeyboardMarkup(
         [
-            InlineKeyboardButton("📊 1 day", callback_data="stats:1"),
-            InlineKeyboardButton("📆 7 days", callback_data="stats:7"),
+            [KeyboardButton(BTN_TODAY), KeyboardButton(BTN_7)],
+            [KeyboardButton(BTN_30), KeyboardButton(BTN_CSV)],
+            [KeyboardButton(BTN_CANCEL)],
         ],
-        [
-            InlineKeyboardButton("🗓 30 days", callback_data="stats:30"),
-            InlineKeyboardButton("⬇️ CSV", callback_data="csv"),
-        ],
-    ])
+        resize_keyboard=True,
+    )
 
-
-# ---------------------------
+# -----------------------------
 # API helpers
-# ---------------------------
-def _headers():
-    return {"X-API-SECRET": API_SECRET} if API_SECRET else {}
-
+# -----------------------------
 async def api_post(path: str, payload: dict):
+    headers = {"X-API-SECRET": API_SECRET} if API_SECRET else {}
     async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.post(f"{API_URL}{path}", json=payload, headers=_headers())
+        r = await client.post(f"{API_URL}{path}", json=payload, headers=headers)
         r.raise_for_status()
         return r.json()
 
 async def api_get_json(path: str, params: dict):
+    headers = {"X-API-SECRET": API_SECRET} if API_SECRET else {}
     async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.get(f"{API_URL}{path}", params=params, headers=_headers())
+        r = await client.get(f"{API_URL}{path}", params=params, headers=headers)
         r.raise_for_status()
         return r.json()
 
-async def api_get_bytes(path: str, params: dict):
-    async with httpx.AsyncClient(timeout=60) as client:
-        r = await client.get(f"{API_URL}{path}", params=params, headers=_headers())
+async def api_get_bytes(path: str, params: dict) -> bytes:
+    headers = {"X-API-SECRET": API_SECRET} if API_SECRET else {}
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(f"{API_URL}{path}", params=params, headers=headers)
         r.raise_for_status()
         return r.content
 
+# -----------------------------
+# Utilities
+# -----------------------------
+def find_cat_key_by_label(label: str, cat_list):
+    for l, k in cat_list:
+        if l == label:
+            return k
+    return None
 
-# ---------------------------
-# Commands
-# ---------------------------
+def parse_amount(text: str) -> int | None:
+    # allow: "90 000", "90000", "90k" not included, keep simple
+    digits = re.sub(r"[^\d]", "", text or "")
+    if not digits:
+        return None
+    try:
+        return int(digits)
+    except Exception:
+        return None
+
+# -----------------------------
+# Start / Menu
+# -----------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "✅ Hamyon bot ishlayapti.\n\n"
-        "Tez qo‘shish (oddiy matn): `food 97500` yoki `transport 12000 taxi`\n\n"
-        "Buyruqlar:\n"
-        "/add <category> <amount> [desc]\n"
-        "/today\n"
-        "/range 7\n"
-        "/csv\n",
+        "Tez yozish ham mumkin:\n"
+        "— `food 97500 lunch`\n"
+        "— `transport 12000 taxi`\n\n"
+        "Pastdagi tugmalar orqali foydalaning 👇",
+        reply_markup=main_kb(),
         parse_mode="Markdown",
-        reply_markup=kb_main(),
     )
 
-def _parse_amount(s: str) -> int:
-    s = s.strip().lower().replace(" ", "").replace("_", "")
-    m = re.match(r"^(\d+(?:\.\d+)?)(k)?$", s)
-    if not m:
-        digits = "".join(ch for ch in s if ch.isdigit())
-        if not digits:
-            raise ValueError("Bad amount")
-        return int(digits)
-    num = float(m.group(1))
-    if m.group(2) == "k":
-        num *= 1000
-    return int(num)
+# -----------------------------
+# Conversation: Add transaction
+# -----------------------------
+async def add_expense_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["tx_type"] = "expense"
+    await update.message.reply_text("Xarajat kategoriyasini tanlang:", reply_markup=categories_kb(CATS_EXPENSE))
+    return CHOOSE_CAT
 
-async def add_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def add_income_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["tx_type"] = "income"
+    await update.message.reply_text("Daromad turini tanlang:", reply_markup=categories_kb(CATS_INCOME))
+    return CHOOSE_CAT
+
+async def choose_cat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    txt = (update.message.text or "").strip()
+    if txt == BTN_CANCEL:
+        await update.message.reply_text("Bekor qilindi ✅", reply_markup=main_kb())
+        return ConversationHandler.END
+
+    tx_type = context.user_data.get("tx_type", "expense")
+    cat_list = CATS_EXPENSE if tx_type == "expense" else CATS_INCOME
+    cat_key = find_cat_key_by_label(txt, cat_list)
+    if not cat_key:
+        await update.message.reply_text("Iltimos, tugmalardan birini tanlang 👇", reply_markup=categories_kb(cat_list))
+        return CHOOSE_CAT
+
+    context.user_data["category_key"] = cat_key
+    await update.message.reply_text("Summani kiriting (masalan: 90000):", reply_markup=cancel_kb())
+    return ENTER_AMOUNT
+
+async def enter_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    txt = (update.message.text or "").strip()
+    if txt == BTN_CANCEL:
+        await update.message.reply_text("Bekor qilindi ✅", reply_markup=main_kb())
+        return ConversationHandler.END
+
+    amount = parse_amount(txt)
+    if amount is None or amount <= 0:
+        await update.message.reply_text("Summa noto‘g‘ri. Masalan: 90000", reply_markup=cancel_kb())
+        return ENTER_AMOUNT
+
+    context.user_data["amount"] = amount
+    await update.message.reply_text("Izoh (ixtiyoriy). Yozing yoki '0' deb yuboring:", reply_markup=cancel_kb())
+    return ENTER_DESC
+
+async def enter_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    txt = (update.message.text or "").strip()
+    if txt == BTN_CANCEL:
+        await update.message.reply_text("Bekor qilindi ✅", reply_markup=main_kb())
+        return ConversationHandler.END
+
+    desc = None if txt in ("0", "-", "yo‘q", "yoq", "нет", "no") else txt
+
     tg_id = update.effective_user.id
-    if len(context.args) < 2:
-        await update.message.reply_text("Misol: /add food 97500 lunch")
-        return
-
-    category_key = context.args[0].strip().lower()
-    try:
-        amount = _parse_amount(context.args[1])
-    except Exception:
-        await update.message.reply_text("❌ Amount noto‘g‘ri. Misol: /add food 97500 lunch")
-        return
-
-    desc = " ".join(context.args[2:]).strip() if len(context.args) > 2 else None
-    desc = desc if desc else None
-
-    await api_post("/transactions", {
-        "telegram_id": tg_id,
-        "type": "expense",
-        "amount": amount,
-        "category_key": category_key,
+    payload = {
+        "telegram_id": tg_id,                         # keep required ✅
+        "type": context.user_data.get("tx_type", "expense"),
+        "amount": context.user_data["amount"],
+        "category_key": context.user_data["category_key"],
         "description": desc,
-        "source": "manual",
-    })
-    await update.message.reply_text("✅ Saqlandi!", reply_markup=kb_main())
+        "source": "menu",
+    }
 
-async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await api_post("/transactions", payload)
+    await update.message.reply_text("✅ Saqlandi!", reply_markup=main_kb())
+    return ConversationHandler.END
+
+async def cancel_any(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Bekor qilindi ✅", reply_markup=main_kb())
+    return ConversationHandler.END
+
+# -----------------------------
+# Reports flow
+# -----------------------------
+async def reports_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Qaysi hisobot kerak?", reply_markup=reports_kb())
+    return CHOOSE_TYPE
+
+async def reports_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    txt = (update.message.text or "").strip()
+    if txt == BTN_CANCEL:
+        await update.message.reply_text("✅", reply_markup=main_kb())
+        return ConversationHandler.END
+
     tg_id = update.effective_user.id
-    data = await api_get_json("/stats/today", {"telegram_id": tg_id})
-    msg = (
-        f"📊 Bugun:\n"
-        f"Xarajat: {data.get('expense', 0)} UZS\n"
-        f"Daromad: {data.get('income', 0)} UZS\n"
-        f"Qarz: {data.get('debt', 0)} UZS\n"
-        f"Tranzaksiya: {data.get('count', 0)}"
-    )
-    await update.message.reply_text(msg, reply_markup=kb_main())
 
-async def range_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    tg_id = update.effective_user.id
-    try:
-        days = int(context.args[0]) if context.args else 7
-    except Exception:
-        days = 7
+    if txt == BTN_TODAY:
+        d = await api_get_json("/stats/today", {"telegram_id": tg_id})
+        msg = (
+            f"📊 Bugun:\n"
+            f"➖ Xarajat: {d['expense']} UZS\n"
+            f"➕ Daromad: {d['income']} UZS\n"
+            f"📄 Qarz: {d['debt']} UZS\n"
+            f"🔢 Tranzaksiya: {d['count']}"
+        )
+        await update.message.reply_text(msg, reply_markup=reports_kb())
+        return CHOOSE_TYPE
 
-    data = await api_get_json("/stats/range", {"telegram_id": tg_id, "days": days})
-    msg = (
-        f"📆 {days} days:\n"
-        f"Xarajat: {data.get('expense', 0)} UZS\n"
-        f"Daromad: {data.get('income', 0)} UZS\n"
-        f"Qarz: {data.get('debt', 0)} UZS"
-    )
-    await update.message.reply_text(msg, reply_markup=kb_main())
+    if txt in (BTN_7, BTN_30):
+        days = 7 if txt == BTN_7 else 30
+        d = await api_get_json("/stats/range", {"telegram_id": tg_id, "days": days})
+        msg = (
+            f"📆 {days} kun:\n"
+            f"➖ Xarajat: {d['expense']} UZS\n"
+            f"➕ Daromad: {d['income']} UZS\n"
+            f"📄 Qarz: {d['debt']} UZS"
+        )
+        await update.message.reply_text(msg, reply_markup=reports_kb())
+        return CHOOSE_TYPE
 
-async def csv_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    tg_id = update.effective_user.id
-    content = await api_get_bytes("/export/csv", {"telegram_id": tg_id})
-    await update.message.reply_document(
-        document=content,
-        filename="transactions.csv",
-        caption="⬇️ CSV export",
-    )
-
-
-# ---------------------------
-# Buttons
-# ---------------------------
-async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-
-    tg_id = q.from_user.id
-    data = q.data
-
-    if data.startswith("stats:"):
-        days = int(data.split(":")[1])
-        if days == 1:
-            d = await api_get_json("/stats/today", {"telegram_id": tg_id})
-            text = (
-                f"📊 1 day\n"
-                f"Xarajat: {d.get('expense', 0)} UZS\n"
-                f"Daromad: {d.get('income', 0)} UZS\n"
-                f"Qarz: {d.get('debt', 0)} UZS\n"
-                f"Tranzaksiya: {d.get('count', 0)}"
-            )
-        else:
-            d = await api_get_json("/stats/range", {"telegram_id": tg_id, "days": days})
-            text = (
-                f"📆 {days} days\n"
-                f"Xarajat: {d.get('expense', 0)} UZS\n"
-                f"Daromad: {d.get('income', 0)} UZS\n"
-                f"Qarz: {d.get('debt', 0)} UZS"
-            )
-        await q.edit_message_text(text, reply_markup=kb_main())
-        return
-
-    if data == "csv":
+    if txt == BTN_CSV:
         content = await api_get_bytes("/export/csv", {"telegram_id": tg_id})
-        await q.message.reply_document(
+        await update.message.reply_document(
             document=content,
             filename="transactions.csv",
             caption="⬇️ CSV export",
         )
+        await update.message.reply_text("Yana hisobot?", reply_markup=reports_kb())
+        return CHOOSE_TYPE
+
+    await update.message.reply_text("Iltimos, tugmalardan tanlang 👇", reply_markup=reports_kb())
+    return CHOOSE_TYPE
+
+# -----------------------------
+# Free text quick add (NLP)
+# Works when user types: "food 97500 lunch"
+# -----------------------------
+async def on_text_quick_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").strip()
+    if text in (BTN_EXPENSE, BTN_INCOME, BTN_REPORTS, BTN_DEBT, BTN_SETTINGS, BTN_APP, BTN_CANCEL):
         return
 
-
-# ---------------------------
-# Text quick-add (NLP)
-# ---------------------------
-async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    tg_id = update.effective_user.id
-    text = (update.message.text or "").strip()
     parsed = parse_quick_add(text)
     if not parsed:
         return
 
     cat, amount, desc = parsed
+    tg_id = update.effective_user.id
+
     await api_post("/transactions", {
         "telegram_id": tg_id,
         "type": "expense",
@@ -219,12 +316,11 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "description": desc,
         "source": "text",
     })
-    await update.message.reply_text("✅ Saqlandi!", reply_markup=kb_main())
+    await update.message.reply_text("✅ Saqlandi!", reply_markup=main_kb())
 
-
-# ---------------------------
+# -----------------------------
 # Voice -> text (optional)
-# ---------------------------
+# -----------------------------
 async def transcribe_voice(file_bytes: bytes) -> str | None:
     if not OPENAI_API_KEY:
         return None
@@ -235,7 +331,7 @@ async def transcribe_voice(file_bytes: bytes) -> str | None:
             model="gpt-4o-mini-transcribe",
             file=("voice.ogg", file_bytes),
         )
-        return (resp.text or "").strip()
+        return resp.text
     except Exception:
         return None
 
@@ -249,16 +345,17 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = await transcribe_voice(bytes(b))
     if not text:
-        await update.message.reply_text("🎙 Ovozni o‘qish uchun OPENAI_API_KEY kerak.")
+        await update.message.reply_text("🎙 Ovozni o‘qish uchun OPENAI_API_KEY kerak.", reply_markup=main_kb())
         return
 
     parsed = parse_quick_add(text)
     if not parsed:
-        await update.message.reply_text(f"🎙 Matn: {text}\n\n❌ Tushunmadim. Misol: 'food 97500'")
+        await update.message.reply_text(f"🎙 Matn: {text}\n\n❌ Tushunmadim. Misol: 'food 97500'", reply_markup=main_kb())
         return
 
-    tg_id = update.effective_user.id
     cat, amount, desc = parsed
+    tg_id = update.effective_user.id
+
     await api_post("/transactions", {
         "telegram_id": tg_id,
         "type": "expense",
@@ -267,28 +364,68 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "description": desc or f"(voice) {text}",
         "source": "voice",
     })
-    await update.message.reply_text(f"🎙 {text}\n✅ Saqlandi!", reply_markup=kb_main())
+    await update.message.reply_text(f"🎙 {text}\n✅ Saqlandi!", reply_markup=main_kb())
 
+# -----------------------------
+# Router for menu buttons
+# -----------------------------
+async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    txt = (update.message.text or "").strip()
 
-# ---------------------------
-# START (NO ASYNCIO.RUN!)
-# ---------------------------
-def main():
+    if txt == BTN_EXPENSE:
+        return await add_expense_entry(update, context)
+    if txt == BTN_INCOME:
+        return await add_income_entry(update, context)
+    if txt == BTN_REPORTS:
+        return await reports_entry(update, context)
+
+    if txt == BTN_SETTINGS:
+        await update.message.reply_text("⚙️ Sozlama (keyin qo‘shamiz).", reply_markup=main_kb())
+        return ConversationHandler.END
+
+    if txt == BTN_DEBT:
+        await update.message.reply_text("📄 Qarz (keyin qo‘shamiz).", reply_markup=main_kb())
+        return ConversationHandler.END
+
+    if txt == BTN_CANCEL:
+        await update.message.reply_text("✅", reply_markup=main_kb())
+        return ConversationHandler.END
+
+    # if not a menu button, try quick add
+    await on_text_quick_add(update, context)
+    return ConversationHandler.END
+
+# -----------------------------
+# App bootstrap
+# -----------------------------
+def build_app() -> Application:
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("add", add_cmd))
-    app.add_handler(CommandHandler("today", today))
-    app.add_handler(CommandHandler("range", range_cmd))
-    app.add_handler(CommandHandler("csv", csv_cmd))
 
-    app.add_handler(CallbackQueryHandler(on_callback))
+    # Add/Report are handled via one conversation for “menu feeling”
+    conv = ConversationHandler(
+        entry_points=[
+            MessageHandler(filters.TEXT & ~filters.COMMAND, menu_router),
+        ],
+        states={
+            CHOOSE_CAT: [MessageHandler(filters.TEXT & ~filters.COMMAND, choose_cat)],
+            ENTER_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, enter_amount)],
+            ENTER_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, enter_desc)],
+
+            # reuse CHOOSE_TYPE for reports menu selection
+            CHOOSE_TYPE: [MessageHandler(filters.TEXT & ~filters.COMMAND, reports_choice)],
+        },
+        fallbacks=[MessageHandler(filters.Regex(f"^{re.escape(BTN_CANCEL)}$"), cancel_any)],
+        allow_reentry=True,
+    )
+    app.add_handler(conv)
 
     app.add_handler(MessageHandler(filters.VOICE, on_voice))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
-    # ✅ This is correct for Railway/container
-    app.run_polling(drop_pending_updates=True)
+    return app
 
 if __name__ == "__main__":
-    main()
+    application = build_app()
+    # IMPORTANT: no asyncio.run, no await here ✅
+    application.run_polling(drop_pending_updates=True)
