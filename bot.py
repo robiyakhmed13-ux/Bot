@@ -1,15 +1,22 @@
 import os
 import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters,
+)
 
 from nlp import parse_quick_add
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 API_URL = os.getenv("API_URL")          # e.g. https://your-api.up.railway.app
-API_SECRET = os.getenv("API_SECRET","") # must match API
+API_SECRET = os.getenv("API_SECRET", "") # must match API
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY","")  # optional voice
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")  # optional voice
 
 if not TOKEN:
     raise ValueError("Missing TELEGRAM_BOT_TOKEN")
@@ -19,10 +26,14 @@ if not API_URL:
 
 def kb_main():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 1 day", callback_data="stats:1"),
-         InlineKeyboardButton("📆 7 days", callback_data="stats:7")],
-        [InlineKeyboardButton("🗓 30 days", callback_data="stats:30"),
-         InlineKeyboardButton("⬇️ CSV", callback_data="csv")],
+        [
+            InlineKeyboardButton("📊 1 day", callback_data="stats:1"),
+            InlineKeyboardButton("📆 7 days", callback_data="stats:7"),
+        ],
+        [
+            InlineKeyboardButton("🗓 30 days", callback_data="stats:30"),
+            InlineKeyboardButton("⬇️ CSV", callback_data="csv"),
+        ],
     ])
 
 
@@ -33,12 +44,22 @@ async def api_post(path: str, json: dict):
         r.raise_for_status()
         return r.json()
 
-async def api_get(path: str, params: dict):
+
+async def api_get_json(path: str, params: dict) -> dict:
     headers = {"X-API-SECRET": API_SECRET} if API_SECRET else {}
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.get(f"{API_URL}{path}", params=params, headers=headers)
         r.raise_for_status()
-        return r
+        return r.json()
+
+
+async def api_get_bytes(path: str, params: dict) -> bytes:
+    headers = {"X-API-SECRET": API_SECRET} if API_SECRET else {}
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(f"{API_URL}{path}", params=params, headers=headers)
+        r.raise_for_status()
+        return r.content
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -53,13 +74,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=kb_main(),
     )
 
+
 async def add_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg_id = update.effective_user.id
+
     if len(context.args) < 2:
         await update.message.reply_text("Misol: /add food 97500 lunch")
         return
+
     category_key = context.args[0]
-    amount = int("".join([c for c in context.args[1] if c.isdigit()]))
+    amount_str = context.args[1]
+    digits = "".join([c for c in amount_str if c.isdigit()])
+    if not digits:
+        await update.message.reply_text("❌ Amount noto‘g‘ri. Misol: /add food 97500 lunch")
+        return
+
+    amount = int(digits)
     desc = " ".join(context.args[2:]) if len(context.args) > 2 else None
 
     await api_post("/transactions", {
@@ -68,14 +98,16 @@ async def add_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "amount": amount,
         "category_key": category_key,
         "description": desc,
-        "source": "manual"
+        "source": "manual",
     })
+
     await update.message.reply_text("✅ Saqlandi!", reply_markup=kb_main())
+
 
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg_id = update.effective_user.id
-    r = await api_get("/stats/today", {"telegram_id": tg_id})
-    data = r.json()
+    data = await api_get_json("/stats/today", {"telegram_id": tg_id})
+
     msg = (
         f"📊 Bugun:\n"
         f"Xarajat: {data['expense']} UZS\n"
@@ -85,11 +117,13 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(msg, reply_markup=kb_main())
 
+
 async def range_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg_id = update.effective_user.id
     days = int(context.args[0]) if context.args else 7
-    r = await api_get("/stats/range", {"telegram_id": tg_id, "days": days})
-    data = r.json()
+
+    data = await api_get_json("/stats/range", {"telegram_id": tg_id, "days": days})
+
     msg = (
         f"📆 {days} days:\n"
         f"Xarajat: {data['expense']} UZS\n"
@@ -98,14 +132,17 @@ async def range_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(msg, reply_markup=kb_main())
 
+
 async def csv_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg_id = update.effective_user.id
-    r = await api_get("/export/csv", {"telegram_id": tg_id})
+    content = await api_get_bytes("/export/csv", {"telegram_id": tg_id})
+
     await update.message.reply_document(
-        document=r.content,
+        document=content,
         filename="transactions.csv",
-        caption="⬇️ CSV export"
+        caption="⬇️ CSV export",
     )
+
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -117,38 +154,55 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("stats:"):
         days = int(data.split(":")[1])
         if days == 1:
-            r = await api_get("/stats/today", {"telegram_id": tg_id})
-            d = r.json()
-            text = f"📊 1 day\nXarajat: {d['expense']} UZS\nDaromad: {d['income']} UZS\nQarz: {d['debt']} UZS\nTranzaksiya: {d['count']}"
+            d = await api_get_json("/stats/today", {"telegram_id": tg_id})
+            text = (
+                f"📊 1 day\n"
+                f"Xarajat: {d['expense']} UZS\n"
+                f"Daromad: {d['income']} UZS\n"
+                f"Qarz: {d['debt']} UZS\n"
+                f"Tranzaksiya: {d['count']}"
+            )
         else:
-            r = await api_get("/stats/range", {"telegram_id": tg_id, "days": days})
-            d = r.json()
-            text = f"📆 {days} days\nXarajat: {d['expense']} UZS\nDaromad: {d['income']} UZS\nQarz: {d['debt']} UZS"
+            d = await api_get_json("/stats/range", {"telegram_id": tg_id, "days": days})
+            text = (
+                f"📆 {days} days\n"
+                f"Xarajat: {d['expense']} UZS\n"
+                f"Daromad: {d['income']} UZS\n"
+                f"Qarz: {d['debt']} UZS"
+            )
+
         await q.edit_message_text(text, reply_markup=kb_main())
         return
 
     if data == "csv":
-        r = await api_get("/export/csv", {"telegram_id": tg_id})
-        await q.message.reply_document(document=r.content, filename="transactions.csv", caption="⬇️ CSV export")
+        content = await api_get_bytes("/export/csv", {"telegram_id": tg_id})
+        await q.message.reply_document(
+            document=content,
+            filename="transactions.csv",
+            caption="⬇️ CSV export",
+        )
         return
 
+
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # NLP quick-add: "food 97500 lunch"
     tg_id = update.effective_user.id
     text = (update.message.text or "").strip()
+
     parsed = parse_quick_add(text)
     if not parsed:
         return
 
     cat, amount, desc = parsed
+
     await api_post("/transactions", {
         "telegram_id": tg_id,
         "type": "expense",
         "amount": amount,
         "category_key": cat,
         "description": desc,
-        "source": "text"
+        "source": "text",
     })
+
     await update.message.reply_text("✅ Saqlandi!", reply_markup=kb_main())
 
 
@@ -159,7 +213,6 @@ async def transcribe_voice(file_bytes: bytes) -> str | None:
     try:
         from openai import OpenAI
         client = OpenAI(api_key=OPENAI_API_KEY)
-        # Whisper-style transcription
         resp = client.audio.transcriptions.create(
             model="gpt-4o-mini-transcribe",
             file=("voice.ogg", file_bytes),
@@ -167,6 +220,7 @@ async def transcribe_voice(file_bytes: bytes) -> str | None:
         return resp.text
     except Exception:
         return None
+
 
 async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg_id = update.effective_user.id
@@ -194,12 +248,13 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "amount": amount,
         "category_key": cat,
         "description": desc or f"(voice) {text}",
-        "source": "voice"
+        "source": "voice",
     })
+
     await update.message.reply_text(f"🎙 {text}\n✅ Saqlandi!", reply_markup=kb_main())
 
 
-async def main():
+def build_application() -> Application:
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -213,8 +268,13 @@ async def main():
     app.add_handler(MessageHandler(filters.VOICE, on_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
-    await app.run_polling(drop_pending_updates=True)
+    return app
+
+
+def main():
+    app = build_application()
+    app.run_polling(drop_pending_updates=True)
+
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    main()
