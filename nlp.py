@@ -1,62 +1,120 @@
 import re
+from typing import Optional, Tuple, List
 
-CAT_ALIASES = {
-  # uz
-  "ovqat":"food", "oziq":"food", "restoran":"food", "kafe":"food",
-  "taksi":"transport", "transport":"transport", "metro":"transport",
-  "ijara":"rent", "komunal":"bills", "telefon":"bills", "internet":"bills",
-  "dori":"health", "apteka":"health",
-  # ru
-  "еда":"food", "такси":"transport", "транспорт":"transport",
-  "аренда":"rent", "коммуналка":"bills", "связь":"bills",
-  # en
-  "food":"food", "taxi":"transport", "rent":"rent", "bills":"bills"
+# Simple category synonyms (extend anytime)
+CAT_MAP = {
+    # uz
+    "taksi": "transport",
+    "transport": "transport",
+    "ovqat": "food",
+    "oziq": "food",
+    "kafe": "food",
+    "restoran": "food",
+    "dorixona": "health",
+    "dori": "health",
+    "internet": "internet",
+    "aloqa": "internet",
+    "kommunal": "utilities",
+    "ijara": "rent",
+
+    # ru
+    "еда": "food",
+    "такси": "transport",
+    "транспорт": "transport",
+    "аптека": "health",
+    "интернет": "internet",
+    "связь": "internet",
+    "коммуналка": "utilities",
+    "аренда": "rent",
+
+    # en
+    "food": "food",
+    "taxi": "transport",
+    "transport": "transport",
+    "pharmacy": "health",
+    "internet": "internet",
+    "rent": "rent",
+    "utilities": "utilities",
 }
 
-def normalize_cat(word: str) -> str:
-    w = (word or "").strip().lower()
-    return CAT_ALIASES.get(w, w)
+AMOUNT_RE = re.compile(r"(\d[\d\s.,]{1,20})")
 
-AMOUNT_RE = re.compile(r"(\d[\d\s.,]*)")
+def _norm_amount(s: str) -> Optional[int]:
+    digits = "".join(ch for ch in s if ch.isdigit())
+    if not digits:
+        return None
+    try:
+        return int(digits)
+    except:
+        return None
 
-def parse_single_line(text: str):
+def normalize_category(word: str) -> str:
+    w = word.strip().lower()
+    return CAT_MAP.get(w, w)
+
+def parse_one(text: str) -> Optional[Tuple[str, int, Optional[str]]]:
     """
-    Examples:
-      "taksi 20000"
-      "ovqat 97 500 lunch"
-    Returns: (cat, amount:int, desc|None) or None
+    Accept:
+      - "taksi 2000"
+      - "food 97500 lunch"
+      - "2000 taksi"
+      - "ovqat 120000"
     """
-    s = (text or "").strip()
-    if not s:
+    t = (text or "").strip()
+    if not t:
         return None
-    parts = s.split()
-    if len(parts) < 2:
-        return None
-    cat = normalize_cat(parts[0])
-    m = AMOUNT_RE.search(s)
+
+    # amount anywhere
+    m = AMOUNT_RE.search(t)
     if not m:
         return None
-    raw = m.group(1)
-    amount = int(re.sub(r"[^\d]", "", raw))
-    # desc = everything after amount match
-    desc = s[m.end():].strip()
-    if desc == "":
-        desc = None
+    amount = _norm_amount(m.group(1))
+    if amount is None:
+        return None
+
+    # remove amount part
+    before = t[:m.start()].strip()
+    after = t[m.end():].strip()
+
+    # choose category: first token in before OR first token in after
+    cat = None
+    desc_parts: List[str] = []
+
+    if before:
+        parts = before.split()
+        cat = normalize_category(parts[0])
+        desc_parts += parts[1:]
+        if after:
+            desc_parts += after.split()
+    else:
+        # amount first -> category likely after
+        parts = after.split()
+        if not parts:
+            return None
+        cat = normalize_category(parts[0])
+        desc_parts += parts[1:]
+
+    desc = " ".join(desc_parts).strip() or None
     return (cat, amount, desc)
 
-def parse_multi(text: str):
+def parse_multi(text: str) -> List[Tuple[str, int, Optional[str]]]:
     """
-    Very simple multi-item split:
-      "taksi 20000, ovqat 85000"
-    returns list of (cat, amount, desc)
+    Support multi-item:
+      "taksi 2000; ovqat 45000; internet 50000"
+      or separated by newline.
     """
-    s = (text or "").strip()
-    if not s:
+    t = (text or "").strip()
+    if not t:
         return []
-    chunks = re.split(r"[,\n;]+", s)
-    out = []
-    for ch in chunks:
-        p = parse_single_line(ch.strip())
-        if p:
-            out.append(p)
-    return out
+    chunks = []
+    for part in re.split(r"[;\n]+", t):
+        part = part.strip()
+        if not part:
+            continue
+        one = parse_one(part)
+        if one:
+            chunks.append(one)
+    return chunks
+
+def looks_like_expense_text(text: str) -> bool:
+    return parse_one(text) is not None
